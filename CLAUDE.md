@@ -4,8 +4,9 @@
 
 You are building directswarm: a fast data plane for Ethereum Swarm —
 kademlia for discovery and persistence, direct libp2p connections for
-mass data (bulk files first, peer-assisted distribution and live
-streams later), everything anchored on Swarm and settled via SWAP.
+mass data (bulk files first, peer-assisted distribution later; live
+streaming deliberately deferred and not a design input), everything
+anchored on Swarm and settled via SWAP.
 Read README.md, DESIGN.md, PLAN.md,
 and OPEN-QUESTIONS.md before writing code. The project exists because of
 measured findings in the sister repo — read
@@ -26,8 +27,8 @@ measured findings in the sister repo — read
 ## Non-negotiable principles
 
 1. **Always settle.** SWAP payment on every connection that moves real
-   data — storer, publisher seed, audience peer, or stream relay;
-   coordination gossip is the only unpaid traffic. Never exploit or
+   data — storer, publisher seed, or audience peer; coordination
+   gossip is the only unpaid traffic. Never exploit or
    recommend pseudosettle free-tier
    multiplication — the user's explicit policy (it's a loophole to
    report upstream, not a feature). Benchmarks that accidentally ran
@@ -48,9 +49,9 @@ measured findings in the sister repo — read
 Work strictly in PLAN.md order. **Phase 0 (storer service-rate spike)
 gates everything** — if strangers get ≲0.1 MB/s per storer, hard stop:
 no fetcher; bring the findings and the seed-pivot option (PLAN Phase 0,
-exit B) to human review. Human review gates: end of Phase 0, before
-publishing anything upstream (Phase 2 proposal, issues, SWIP drafts),
-and end of Phase 5 before any streaming write-up.
+exit B) to human review. Human review gates: end of Phase 0, and
+before publishing anything upstream (Phase 2 proposal, issues, SWIP
+drafts).
 
 ## Spending rules
 

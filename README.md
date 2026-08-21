@@ -1,7 +1,7 @@
 # directswarm
 
 **Kademlia for discovery and persistence; direct libp2p connections
-for mass data — bulk files first, live streams later.**
+for mass data.**
 
 directswarm is a fast data plane for [Ethereum Swarm](https://www.ethswarm.org/).
 Content is published, discovered, and persisted on Swarm exactly as
@@ -39,8 +39,7 @@ A 1 GiB file's ~260k chunks spread over ~all ≈512 neighborhoods
 directly turns one narrow funnel into hundreds of independent 1-hop
 sources. Even ~10 pipelined chunks per storer at ~30 ms clears
 25 MB/s aggregate with a wide margin; per-connection libp2p capacity is
-~2–3 orders of magnitude above what's needed. Live media needs the same
-inversion plus a distribution tree — see DESIGN.md.
+~2–3 orders of magnitude above what's needed.
 
 ## Invariants
 
@@ -57,8 +56,8 @@ per-value accounting is DESIGN.md's "what forwarding kademlia buys".
    it. Untrusted sources can waste time, never corrupt content — and
    any generic Swarm tool can fetch the same reference.
 3. **Always settled.** SWAP payment on every connection that moves
-   real data — storer, publisher seed, audience peer, or stream relay.
-   Gossip carries coordination messages only, never content. Free-tier
+   real data — storer, publisher seed, or audience peer. Gossip
+   carries coordination messages only, never content. Free-tier
    (pseudosettle) multiplication is a loophole to report upstream, not
    a feature — the user's explicit policy.
 4. **Fallback intact.** Stock forwarding retrieval remains first-class
@@ -66,20 +65,47 @@ per-value accounting is DESIGN.md's "what forwarding kademlia buys".
    stays reachable — and privately fetchable — through plain Swarm.
 
 Plus etiquette throughout: rate-limited crawls and dials, back off from
-refusals; a fetch or a stream must never be distinguishable from abuse.
+refusals; a fetch must never be distinguishable from abuse.
 
 ## The honest trade
 
 Direct dialing reveals the requester to the source: **requester
 anonymity is reduced on the fast plane**, and this design does not
 pretend otherwise. It is an opt-in mode — right for public bulk
-artifacts (ML weights, published media, public streams), wrong as a
-silent default; privacy-sensitive fetches use the stock path
-(invariant 4). Forwarder earnings are bypassed on direct fetches, but
-the serving role stays paid and widens: any peer holding wanted chunks
-can sell them (audience serving, paid stream relays), which restores
-relay economics in a different — arguably stronger — form. All of it is
-raised upstream as a proposal, never presented as a fait accompli.
+artifacts (ML weights, published media), wrong as a silent default;
+privacy-sensitive fetches use the stock path (invariant 4).
+
+That said, the baseline being traded is weaker than advertised
+(DESIGN.md, "Anonymity, reassessed"): Swarm's ambient anonymity has
+never had an adversarial analysis, light clients provably originate
+every request they make (they forward no one else's, and the first hop
+sees requester and content linked), and SWAP cheques tie fetches to a
+chequebook identity on *any* path. Rigorous requester anonymity was
+always going to need a dedicated layer (Tor, Nym) in front of Swarm —
+and such a layer composes with direct transfer at least as well as
+with forwarding. directswarm claims no privacy either way.
+
+Forwarder earnings are bypassed on direct fetches, but the serving
+role stays paid and widens: any peer holding wanted chunks can sell
+them (audience serving), which restores relay economics in a
+different — arguably stronger — form. All of it is raised upstream as
+a proposal, never presented as a fait accompli — including the
+systemic question of what happens if everyone adopts this (DESIGN.md,
+"Systemic effects"; the short answer: it can only ever displace the
+retrieval forwarding path for public bulk bytes, it is self-limiting
+there, and the use cases it opens may strengthen the network more than
+they cost it).
+
+## How it ships
+
+A standalone client — a core library plus a thin CLI (later a daemon
+mode for seeding) — **not an add-on to bee**, which has no plugin
+mechanism, and never a fork of it. A local Bee node is an optional
+companion (the forwarding fallback), not a requirement or a bundle:
+directswarm has its own overlay identity and its own funded
+chequebook. If upstream adopts the direct retrieval strategy, the
+capability lands inside stock bee for everyone, and directswarm's
+remaining role is reference implementation and measurement harness.
 
 ## What it is not
 
@@ -105,9 +131,13 @@ reference implementation and measurement harness.
 
 ## Status
 
-Handoff / design stage, revision 2 (2026-08-21): scope widened from
-bulk fetcher to the two-plane design (bulk → peer-assist → streams);
-nothing implemented. Read DESIGN.md, PLAN.md, OPEN-QUESTIONS.md —
-Phase 0 (the storer service-rate spike) still gates everything, and
-several fast-plane decisions are explicitly parked for discussion
+Handoff / design stage, revision 2.2 (2026-08-21): the two-plane
+design (bulk fetcher first, peer-assist later); live streaming was
+considered and deliberately demoted to a deferred note so it cannot
+shape the design (DESIGN.md, "Deferred: live streams"); rev 2.2 adds
+form factor, the systemic-adoption analysis, and the anonymity
+reassessment. Nothing
+implemented. Read DESIGN.md, PLAN.md, OPEN-QUESTIONS.md — Phase 0 (the
+storer service-rate spike) still gates everything, and several
+fast-plane decisions are explicitly parked for discussion
 (OPEN-QUESTIONS.md is the agenda).
