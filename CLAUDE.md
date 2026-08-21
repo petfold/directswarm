@@ -2,9 +2,11 @@
 
 ## Context
 
-You are building directswarm: a bulk-transfer client for Ethereum Swarm
-that uses kademlia only for discovery and direct libp2p connections to
-storer neighborhoods for mass data. Read README.md, DESIGN.md, PLAN.md,
+You are building directswarm: a fast data plane for Ethereum Swarm —
+kademlia for discovery and persistence, direct libp2p connections for
+mass data (bulk files first, peer-assisted distribution and live
+streams later), everything anchored on Swarm and settled via SWAP.
+Read README.md, DESIGN.md, PLAN.md,
 and OPEN-QUESTIONS.md before writing code. The project exists because of
 measured findings in the sister repo — read
 `../weightstation/bench/REPORT.md` for the numbers this design answers.
@@ -24,7 +26,9 @@ measured findings in the sister repo — read
 ## Non-negotiable principles
 
 1. **Always settle.** SWAP payment on every connection that moves real
-   data. Never exploit or recommend pseudosettle free-tier
+   data — storer, publisher seed, audience peer, or stream relay;
+   coordination gossip is the only unpaid traffic. Never exploit or
+   recommend pseudosettle free-tier
    multiplication — the user's explicit policy (it's a loophole to
    report upstream, not a feature). Benchmarks that accidentally ran
    unpaid are labeled as such, never presented as the result.
@@ -42,10 +46,11 @@ measured findings in the sister repo — read
 ## Phase gates
 
 Work strictly in PLAN.md order. **Phase 0 (storer service-rate spike)
-gates everything** — if strangers get ≲0.1 MB/s per storer, stop and
-write up findings for upstream instead of building the fetcher.
-Human review gates: end of Phase 0, and before publishing anything
-upstream (Phase 2 proposal, issues, SWIP drafts).
+gates everything** — if strangers get ≲0.1 MB/s per storer, hard stop:
+no fetcher; bring the findings and the seed-pivot option (PLAN Phase 0,
+exit B) to human review. Human review gates: end of Phase 0, before
+publishing anything upstream (Phase 2 proposal, issues, SWIP drafts),
+and end of Phase 5 before any streaming write-up.
 
 ## Spending rules
 
@@ -58,6 +63,8 @@ burn-accounting pattern), and keep a spend ledger in STATUS.md.
 
 No anonymity claims, no gateway/hosted service, no protocol forks, no
 custom chunk formats, no upload path before retrieval proves out, no
+shadow network (nothing moves on the fast plane that isn't anchored on
+Swarm with valid postage), no trackers or hosted rendezvous, no
 incentive-scheme design (report incentive findings upstream instead).
 
 ## Status discipline
