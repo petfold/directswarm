@@ -49,6 +49,41 @@ blessings used — 80 under the Phase-0 grant (2×40), 235 under the new
 240-dial grant (user, 2026-08-22); ≤2 dials/s, one attempt per peer,
 no retries, polite disconnects throughout; spend 0.
 
+**Phase 1 M4-cont (same day): transport reworked — SCALING FIXED.**
+Replaced the single shared swarm with **one libp2p swarm + poller per
+connection**, actors dialed in PARALLEL (churned-storer timeouts now
+overlap instead of summing). Re-measured on Ethernet, direct-only:
+
+| conns | direct MB/s | wall | per-conn | vs old |
+|---|---|---|---|---|
+| 4 | 0.021 | 24 s | 0.0054 | (old 4: 0.020, 79 s) |
+| 16 | 0.055 | 41 s | 0.0035 | **old 16: flat, never finished** |
+| 32 | 0.085 | 92 s | 0.0027 | (old couldn't reach) |
+
+**Aggregate now rises monotonically and every run completes** — the
+single-poller ceiling is gone; the funnel works structurally, as
+Phase 0 predicted. Two honest caveats remain:
+1. **Sublinear** (4→32 = 8× conns → ~4× throughput; per-conn declines
+   0.0054→0.0027). A secondary shared-resource bottleneck — most
+   likely the global `ChunkStore` mutex (every chunk = lock + file
+   seek/write) and/or public-RPC contention. M5: shard/blocking-offload
+   the store, parse per-peer threshold, AIMD depth, hedged tails.
+2. **Per-connection rate is still settlement-paced** (~0.003–0.005
+   MB/s): reserve cap = ½ threshold (~4 chunks in flight) × bee's
+   ~2.5 s cheque-credit lag. At this rate 25 MB/s is not reachable by
+   connection count alone; it needs the per-connection rate up ~40×
+   (the Phase-0 *patched-bee* regime showed 0.23 MB/s/conn → ~110
+   conns = 25 MB/s). The credit-lag pacing is the M5 lever.
+3. **Residual debt on peer-drop** (2–7 M units/run ≈ 0.0002–0.0007
+   xBZZ): when bee drops a slow/idle connection before our final sweep
+   cheque lands, that debt is owed-but-unpayable (we *attempted* to
+   settle — not free-riding; logged). M5: settle more eagerly (lower
+   trigger) and track owed-on-drop for repay-on-reconnect.
+Rework spend ≈ 0.013 xBZZ (three tiers, all live cheques). Scaling
+curve in `.phase1/m4-scaling-reworked.csv`. **The "doesn't scale"
+blocker is resolved; remaining work is per-connection throughput
+(M5).**
+
 **Phase 1 M4 (same day): multi-connection settled scheduler built +
 measured — CORRECT, but does NOT scale as built.** `directswarm
 fetch-direct` stands up one libp2p swarm with N settled storer

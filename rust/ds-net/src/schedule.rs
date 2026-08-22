@@ -1,10 +1,14 @@
 //! M4 — the multi-connection settled scheduler.
 //!
-//! One libp2p swarm holds N direct storer connections at once. Each
-//! chunk is routed to a connected storer whose overlay covers its
-//! neighborhood (lowest observed RTT first — the latency-aware
-//! selection of DESIGN.md), pipelined with per-connection AIMD depth,
-//! every connection fully SWAP-settled through a shared spend cap.
+//! N storer connections run as independent actors, **each owning its
+//! own libp2p swarm and poller** — the original shared-swarm design
+//! serialized all connections' stream I/O through one poll loop and
+//! did not scale (measured flat in N); per-connection pollers remove
+//! that ceiling. Actors are dialed in PARALLEL so a churned storer's
+//! timeout overlaps its peers' instead of summing. Each chunk is
+//! routed to a covering storer (proximity ≥ depth), pipelined at a
+//! fixed per-connection depth, every connection fully SWAP-settled
+//! through a shared global spend cap.
 //! Chunks no connection covers fall back to the local bee's forwarding
 //! retrieval (invariant 4). Fetched chunks land in an on-disk
 //! [`ChunkStore`]; the caller reassembles + byte-verifies with the M1
@@ -22,7 +26,6 @@ use libp2p::{dns, identify, noise, ping, tcp, yamux};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder};
 use libp2p_stream::{Behaviour as StreamBehaviour, Control};
 use primitive_types::U256;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -41,7 +44,6 @@ use crate::store::ChunkStore;
 const ASSUMED_THRESHOLD: u64 = 1_350_000;
 const REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(1100);
 const CHEQUE_CREDIT_DELAY: Duration = Duration::from_millis(2500);
-const DIAL_INTERVAL: Duration = Duration::from_millis(500);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone)]
@@ -164,196 +166,54 @@ pub async fn fetch_scheduled(
         return Ok(report);
     }
 
-    // Cached invariant read (once), shared spend counter, shared ledger.
+    // Cached invariant read (once) + shared global cheque spend cap.
+    // Each connection keeps its own in-memory outbound cheque ledger
+    // (distinct beneficiary per peer, so no cross-connection sharing is
+    // needed); the ledger_path is reserved for future persistence.
+    let _ = &opts.ledger_path;
     let issuable = read_chequebook_issuable_raw(&opts.rpc_url, opts.chequebook).await?;
     let issued_plur = Arc::new(AtomicU64::new(0));
-    let ledger = Arc::new(ant_p2p::swap::OutboundLedger::open(Some(
-        opts.ledger_path.clone(),
-    )));
-    tracing::info!(%issuable, "chequebook cached invariant read once (shared across connections)");
+    tracing::info!(%issuable, "chequebook cached invariant read once (shared spend cap across connections)");
 
-    // Swarm + shared accounting + sinks.
-    let behaviour = Behaviour {
-        stream: StreamBehaviour::default(),
-        identify: identify::Behaviour::new(
-            identify::Config::new("bee/2.8.0".into(), id.keypair.public())
-                .with_agent_version("directswarm/0.1.0".into()),
-        ),
-        ping: ping::Behaviour::new(ping::Config::new()),
-    };
-    let mut swarm = SwarmBuilder::with_existing_identity(id.keypair.clone())
-        .with_tokio()
-        .with_tcp(
-            tcp::Config::default(),
-            noise::Config::new,
-            yamux::Config::default,
-        )?
-        .with_dns_config(
-            dns::ResolverConfig::cloudflare(),
-            dns::ResolverOpts::default(),
-        )
-        .with_behaviour(|_| behaviour)
-        .expect("infallible behaviour")
-        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(300)))
-        .build();
-    let mut control = swarm.behaviour().stream.new_control();
-    mount_drain_sinks(&mut control);
-
-    let acct = Arc::new(Accounting::new());
-
-    // Select storers that cover the needed chunks, RTT-first.
+    // Select storers that cover the needed chunks, most-coverage first.
     let selected = select_storers(cache, &needed, opts.depth, opts.connections);
     if selected.is_empty() {
         return Err(anyhow!("no storer in the cache covers any needed chunk"));
     }
 
-    // Drive the swarm; track liveness per peer.
-    let live: Arc<Mutex<HashMap<PeerId, Arc<std::sync::atomic::AtomicBool>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-    let (dial_tx, mut dial_rx) = mpsc::channel::<Multiaddr>(64);
-    let (conn_tx, mut conn_rx) = mpsc::channel::<PeerId>(64);
-    {
-        let live = live.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    evt = futures::StreamExt::next(&mut swarm) => match evt {
-                        None => break,
-                        Some(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
-                            let _ = conn_tx.send(peer_id).await;
-                        }
-                        Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
-                            if let Some(flag) = live.lock().await.get(&peer_id) {
-                                flag.store(false, Ordering::Relaxed);
-                            }
-                        }
-                        Some(_) => {}
-                    },
-                    addr = dial_rx.recv() => match addr {
-                        None => break,
-                        Some(addr) => { let _ = swarm.dial(addr); }
-                    },
-                }
-            }
-        });
-    }
-
-    // Dial + handshake each selected storer (rate-limited).
-    let mut conns: Vec<Arc<Conn>> = Vec::new();
-    for storer in &selected {
-        let Some(peer_id) = crate::direct::extract_peer_id(&storer.underlay) else {
-            continue;
-        };
-        if dial_tx.send(storer.underlay.clone()).await.is_err() {
-            break;
-        }
-        // Wait for connection establishment (best effort).
-        let _ = tokio::time::timeout(DIAL_TIMEOUT, wait_for(&mut conn_rx, peer_id)).await;
-        match tokio::time::timeout(
-            DIAL_TIMEOUT,
-            handshake_with_fallback_raw(
-                &mut control,
-                id,
-                peer_id,
-                &storer.underlay,
-                opts.network_id,
-            ),
-        )
-        .await
-        {
-            Ok(Ok(info)) => {
-                let flag = Arc::new(std::sync::atomic::AtomicBool::new(true));
-                live.lock().await.insert(peer_id, flag.clone());
-                conns.push(Arc::new(Conn {
-                    peer_id,
-                    overlay: info.remote_overlay,
-                    beneficiary: info.remote_eth_address,
-                    queue: Mutex::new(Vec::new()),
-                    alive: flag,
-                }));
-            }
-            Ok(Err(err)) => report.errors.push(format!("handshake {peer_id}: {err}")),
-            Err(_) => report.errors.push(format!("handshake {peer_id}: timeout")),
-        }
-        tokio::time::sleep(DIAL_INTERVAL).await;
-    }
-    report.connections_opened = conns.len();
-    if conns.is_empty() {
-        return Err(anyhow!("no storer connection established"));
-    }
-    // Let pricing/swap registration settle before retrieval.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // Route chunks: each to the covering connection with the shortest
-    // queue (spreads load); uncovered → fallback.
+    // Route each chunk to the covering storer with the shortest queue;
+    // uncovered → fallback (or dropped in direct-only mode).
     let (fb_tx, fb_rx) = mpsc::unbounded_channel::<[u8; 32]>();
-    {
-        let mut queues: Vec<Vec<[u8; 32]>> = vec![Vec::new(); conns.len()];
-        for addr in &needed {
-            let mut best: Option<usize> = None;
-            for (i, c) in conns.iter().enumerate() {
-                if proximity(&c.overlay, addr) >= opts.depth
-                    && best.is_none_or(|b| queues[i].len() < queues[b].len())
-                {
-                    best = Some(i);
-                }
-            }
-            match best {
-                Some(i) => queues[i].push(*addr),
-                None => {
-                    if opts.direct_only {
-                        report.chunks_dropped_uncovered += 1;
-                    } else {
-                        let _ = fb_tx.send(*addr);
-                    }
-                }
+    let mut queues: Vec<Vec<[u8; 32]>> = vec![Vec::new(); selected.len()];
+    for addr in &needed {
+        let mut best: Option<usize> = None;
+        for (i, s) in selected.iter().enumerate() {
+            if proximity(&s.overlay, addr) >= opts.depth
+                && best.is_none_or(|b| queues[i].len() < queues[b].len())
+            {
+                best = Some(i);
             }
         }
-        for (c, q) in conns.iter().zip(queues) {
-            *c.queue.lock().await = q;
+        match best {
+            Some(i) => queues[i].push(*addr),
+            None => {
+                if opts.direct_only {
+                    report.chunks_dropped_uncovered += 1;
+                } else {
+                    let _ = fb_tx.send(*addr);
+                }
+            }
         }
     }
 
-    // Per-connection settlement drivers + fetch workers.
+    // Shared result counters (each connection has its OWN swarm/poller
+    // — no shared transport, so no single-poller contention).
     let direct_bytes = Arc::new(AtomicU64::new(0));
     let direct_ok = Arc::new(AtomicU64::new(0));
     let cheques = Arc::new(AtomicU64::new(0));
     let cheque_plur = Arc::new(AtomicU64::new(0));
     let refresh_units = Arc::new(AtomicU64::new(0));
-
-    let started = Instant::now();
-    let mut settle_handles = Vec::new();
-    let mut fetch_handles = Vec::new();
-    for c in &conns {
-        settle_handles.push(tokio::spawn(settlement_driver(SettleArgs {
-            control: control.clone(),
-            conn: c.clone(),
-            acct: acct.clone(),
-            secret: id.secret,
-            chequebook: opts.chequebook,
-            chain_id: opts.chain_id,
-            ledger: ledger.clone(),
-            issuable,
-            issued_plur: issued_plur.clone(),
-            max_issue_plur: opts.max_issue_plur,
-            cheques: cheques.clone(),
-            cheque_plur: cheque_plur.clone(),
-            refresh_units: refresh_units.clone(),
-        })));
-        fetch_handles.push(tokio::spawn(fetch_worker(FetchArgs {
-            control: control.clone(),
-            conn: c.clone(),
-            acct: acct.clone(),
-            store: store.clone(),
-            bytes: direct_bytes.clone(),
-            direct_ok: direct_ok.clone(),
-            fallback: fb_tx.clone(),
-            depth: opts.start_depth,
-        })));
-    }
-    // Only worker-held clones remain; when they finish, the fallback
-    // receiver closes.
-    drop(fb_tx);
+    let opened = Arc::new(AtomicU64::new(0));
 
     // Fallback worker (bee forwarding) drains uncovered + failed chunks.
     let fallback = BeeApiFetcher::new(&opts.bee_url)?;
@@ -382,24 +242,51 @@ pub async fn fetch_scheduled(
         fails
     });
 
-    // Wait for fetch workers, then signal settlement drivers to finish.
-    for h in fetch_handles {
-        let _ = h.await;
+    // Spawn one connection actor PER storer, all in parallel — each
+    // owns its libp2p swarm + poller. Parallel dial tolerates churned
+    // storers (their timeouts overlap instead of summing).
+    let started = Instant::now();
+    let mut actors = Vec::new();
+    for (storer, queue) in selected.into_iter().zip(queues) {
+        actors.push(tokio::spawn(run_connection(ConnArgs {
+            id_secret: id.secret,
+            id_nonce: id.nonce,
+            keypair: id.keypair.clone(),
+            storer,
+            queue,
+            network_id: opts.network_id,
+            chain_id: opts.chain_id,
+            chequebook: opts.chequebook,
+            issuable,
+            issued_plur: issued_plur.clone(),
+            max_issue_plur: opts.max_issue_plur,
+            depth: opts.start_depth,
+            store: store.clone(),
+            fallback: fb_tx.clone(),
+            direct_bytes: direct_bytes.clone(),
+            direct_ok: direct_ok.clone(),
+            cheques: cheques.clone(),
+            cheque_plur: cheque_plur.clone(),
+            refresh_units: refresh_units.clone(),
+            opened: opened.clone(),
+        })));
     }
-    for c in &conns {
-        c.alive.store(false, Ordering::Relaxed); // signal settle drivers to sweep+exit
-    }
+    // Only actor-held fallback senders remain; when they finish, the
+    // fallback receiver closes.
+    drop(fb_tx);
+
     let mut residual = 0u64;
-    for h in settle_handles {
-        if let Ok(r) = h.await {
+    for a in actors {
+        if let Ok(r) = a.await {
             residual += r;
         }
     }
-    // fb_tx senders inside workers are dropped now; close fallback.
     let fb_fails = fb_handle.await.unwrap_or_default();
     store.flush()?;
 
     report.wall = started.elapsed();
+    report.connections_opened =
+        usize::try_from(opened.load(Ordering::Relaxed)).unwrap_or(usize::MAX);
     report.direct_bytes = direct_bytes.load(Ordering::Relaxed);
     report.fallback_bytes = fb_bytes.load(Ordering::Relaxed);
     report.chunks_from_direct = direct_ok.load(Ordering::Relaxed);
@@ -412,12 +299,213 @@ pub async fn fetch_scheduled(
         .saturating_sub(report.chunks_from_direct + report.chunks_from_fallback)
         .saturating_sub(report.chunks_dropped_uncovered);
     report.errors.extend(fb_fails);
+    if report.connections_opened == 0 {
+        return Err(anyhow!("no storer connection established"));
+    }
     Ok(report)
+}
+
+/// Everything one connection actor needs. Each actor owns its own
+/// libp2p swarm, so the shared items are only the store, the settlement
+/// spend cap/ledger, and the result counters.
+struct ConnArgs {
+    id_secret: [u8; 32],
+    id_nonce: [u8; 32],
+    keypair: libp2p::identity::Keypair,
+    storer: Selected,
+    queue: Vec<[u8; 32]>,
+    network_id: u64,
+    chain_id: u64,
+    chequebook: [u8; 20],
+    issuable: U256,
+    issued_plur: Arc<AtomicU64>,
+    max_issue_plur: u64,
+    depth: usize,
+    store: Arc<ChunkStore>,
+    fallback: mpsc::UnboundedSender<[u8; 32]>,
+    direct_bytes: Arc<AtomicU64>,
+    direct_ok: Arc<AtomicU64>,
+    cheques: Arc<AtomicU64>,
+    cheque_plur: Arc<AtomicU64>,
+    refresh_units: Arc<AtomicU64>,
+    opened: Arc<AtomicU64>,
+}
+
+/// One connection actor: own swarm + poller, dial + handshake its
+/// storer, settle + fetch its assigned chunks, polite disconnect.
+/// Returns residual unsettled units (0 on a clean close). On any
+/// dial/handshake failure, its assigned chunks go to the fallback.
+#[allow(clippy::too_many_lines)]
+async fn run_connection(a: ConnArgs) -> u64 {
+    let Some(peer_id) = crate::direct::extract_peer_id(&a.storer.underlay) else {
+        for addr in a.queue {
+            let _ = a.fallback.send(addr);
+        }
+        return 0;
+    };
+
+    // Build this connection's own swarm.
+    let mut swarm = match build_swarm(&a.keypair) {
+        Ok(s) => s,
+        Err(err) => {
+            tracing::debug!(%peer_id, "swarm build failed: {err}");
+            for addr in a.queue {
+                let _ = a.fallback.send(addr);
+            }
+            return 0;
+        }
+    };
+    let mut control = swarm.behaviour().stream.new_control();
+    mount_drain_sinks(&mut control);
+
+    // Dial before handing the swarm to its poller.
+    if swarm.dial(a.storer.underlay.clone()).is_err() {
+        for addr in a.queue {
+            let _ = a.fallback.send(addr);
+        }
+        return 0;
+    }
+    let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (est_tx, est_rx) = tokio::sync::oneshot::channel::<()>();
+    let (bye_tx, mut bye_rx) = tokio::sync::oneshot::channel::<()>();
+    {
+        let alive = alive.clone();
+        tokio::spawn(async move {
+            let mut est_tx = Some(est_tx);
+            loop {
+                tokio::select! {
+                    evt = futures::StreamExt::next(&mut swarm) => match evt {
+                        None => break,
+                        Some(SwarmEvent::ConnectionEstablished { peer_id: p, .. }) if p == peer_id => {
+                            if let Some(tx) = est_tx.take() { let _ = tx.send(()); }
+                        }
+                        Some(SwarmEvent::ConnectionClosed { peer_id: p, .. }) if p == peer_id => {
+                            alive.store(false, Ordering::Relaxed);
+                        }
+                        Some(_) => {}
+                    },
+                    _ = &mut bye_rx => {
+                        let _ = swarm.disconnect_peer_id(peer_id);
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    // Wait for the connection, then handshake (both time-bounded so a
+    // churned storer fails fast without holding up its peers).
+    let connected = tokio::time::timeout(DIAL_TIMEOUT, est_rx).await;
+    if connected.is_err() {
+        for addr in a.queue {
+            let _ = a.fallback.send(addr);
+        }
+        let _ = bye_tx.send(());
+        return 0;
+    }
+    let id_for_hs = crate::identity::Identity {
+        secret: a.id_secret,
+        eth: [0u8; 20],
+        nonce: a.id_nonce,
+        overlay: [0u8; 32],
+        keypair: a.keypair.clone(),
+    };
+    let handshake = tokio::time::timeout(
+        DIAL_TIMEOUT,
+        handshake_with_fallback_raw(
+            &mut control,
+            &id_for_hs,
+            peer_id,
+            &a.storer.underlay,
+            a.network_id,
+        ),
+    )
+    .await;
+    let Ok(Ok(info)) = handshake else {
+        for addr in a.queue {
+            let _ = a.fallback.send(addr);
+        }
+        let _ = bye_tx.send(());
+        return 0;
+    };
+    a.opened.fetch_add(1, Ordering::Relaxed);
+    // Let pricing/swap registration land before retrieval.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let conn = Arc::new(Conn {
+        peer_id,
+        overlay: info.remote_overlay,
+        beneficiary: info.remote_eth_address,
+        queue: Mutex::new(a.queue),
+        alive: alive.clone(),
+    });
+    let acct = Arc::new(Accounting::new());
+
+    let settle = tokio::spawn(settlement_driver(SettleArgs {
+        control: control.clone(),
+        conn: conn.clone(),
+        acct: acct.clone(),
+        secret: a.id_secret,
+        chequebook: a.chequebook,
+        chain_id: a.chain_id,
+        ledger: Arc::new(ant_p2p::swap::OutboundLedger::open(None)),
+        issuable: a.issuable,
+        issued_plur: a.issued_plur.clone(),
+        max_issue_plur: a.max_issue_plur,
+        cheques: a.cheques.clone(),
+        cheque_plur: a.cheque_plur.clone(),
+        refresh_units: a.refresh_units.clone(),
+    }));
+
+    fetch_worker(FetchArgs {
+        control: control.clone(),
+        conn: conn.clone(),
+        acct: acct.clone(),
+        store: a.store.clone(),
+        bytes: a.direct_bytes.clone(),
+        direct_ok: a.direct_ok.clone(),
+        fallback: a.fallback.clone(),
+        depth: a.depth,
+    })
+    .await;
+
+    conn.alive.store(false, Ordering::Relaxed); // signal settlement to sweep + exit
+    let residual = settle.await.unwrap_or(0);
+    let _ = bye_tx.send(());
+    residual
+}
+
+fn build_swarm(keypair: &libp2p::identity::Keypair) -> Result<libp2p::Swarm<Behaviour>> {
+    let behaviour = Behaviour {
+        stream: StreamBehaviour::default(),
+        identify: identify::Behaviour::new(
+            identify::Config::new("bee/2.8.0".into(), keypair.public())
+                .with_agent_version("directswarm/0.1.0".into()),
+        ),
+        ping: ping::Behaviour::new(ping::Config::new()),
+    };
+    Ok(SwarmBuilder::with_existing_identity(keypair.clone())
+        .with_tokio()
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )?
+        .with_dns_config(
+            dns::ResolverConfig::cloudflare(),
+            dns::ResolverOpts::default(),
+        )
+        .with_behaviour(|_| behaviour)
+        .expect("infallible behaviour")
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(300)))
+        .build())
 }
 
 /// A selected storer to connect to.
 struct Selected {
     underlay: Multiaddr,
+    overlay: [u8; 32],
 }
 
 fn select_storers(
@@ -428,7 +516,7 @@ fn select_storers(
 ) -> Vec<Selected> {
     // Rank candidate storers by how many needed chunks they cover,
     // tie-broken by RTT; greedily take the top `connections`.
-    let mut scored: Vec<(usize, u32, Multiaddr)> = Vec::new();
+    let mut scored: Vec<(usize, u32, Multiaddr, [u8; 32])> = Vec::new();
     for rec in cache.records() {
         let Some(underlay) = rec.underlays.iter().find_map(|u| public_dialable(u)) else {
             continue;
@@ -438,7 +526,12 @@ fn select_storers(
             .filter(|a| proximity(&rec.overlay, a) >= depth)
             .count();
         if covers > 0 {
-            scored.push((covers, rec.rtt_ms.unwrap_or(u32::MAX), underlay));
+            scored.push((
+                covers,
+                rec.rtt_ms.unwrap_or(u32::MAX),
+                underlay,
+                rec.overlay,
+            ));
         }
     }
     // Most coverage first, then lowest RTT.
@@ -446,7 +539,7 @@ fn select_storers(
     scored
         .into_iter()
         .take(connections)
-        .map(|(_, _, underlay)| Selected { underlay })
+        .map(|(_, _, underlay, overlay)| Selected { underlay, overlay })
         .collect()
 }
 
@@ -460,14 +553,6 @@ fn public_dialable(u: &str) -> Option<Multiaddr> {
         u.parse().ok()
     } else {
         None
-    }
-}
-
-async fn wait_for(rx: &mut mpsc::Receiver<PeerId>, want: PeerId) {
-    while let Some(p) = rx.recv().await {
-        if p == want {
-            return;
-        }
     }
 }
 
