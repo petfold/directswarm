@@ -49,6 +49,46 @@ blessings used — 80 under the Phase-0 grant (2×40), 235 under the new
 240-dial grant (user, 2026-08-22); ≤2 dials/s, one attempt per peer,
 no retries, polite disconnects throughout; spend 0.
 
+**Phase 1 M4 diagnosis (same day, user-prompted "thousands of times
+slower — something is seriously wrong"): TWO real bugs found and
+fixed; the remainder is a quantified protocol ceiling, not a defect.**
+Instrumented per-chunk/per-settlement timing and ran seven live
+single/16-conn diagnostics:
+1. **Wire is fast**: retrieve p50 60–80 ms; with headroom a single
+   connection burst **16 chunks in 0.55 s ≈ 0.12 MB/s** — the target
+   regime exists on the wire.
+2. **BUG (the big one): in-memory cheque ledgers.** The scheduler
+   opened a fresh outbound ledger per run/connection, but bee's
+   chequestore permanently keeps the highest validated cumulative per
+   chequebook — so re-runs sent non-increasing cheques, bee rejected
+   them ("ChequeNotIncreasing"), debt built unsettled, peer blocklisted
+   us ~10 s in. Explained ALL the mysterious mid-run deaths. Fixed:
+   one persisted ledger (`.phase1/identity/outbound-cheques.json`)
+   shared across connections and runs; as a bonus its emit-time
+   cumulative runs ahead of bee's validation-time store, so owed-on-drop
+   residue is automatically repaid by the next accepted cheque
+   (measured: the first synced run paid 0.0012 xBZZ of prior residuals).
+3. **Calibrated the true pacing constant**: bee credits a cheque only
+   after ~4 on-chain RPC calls ≈ **2.5–3 s validation latency**. Safety
+   invariant `cap + one_unvalidated_cheque ≤ 1.6875M` → cap 800k,
+   cheque ≤600k, instant self-credit, ≥3 s between cheques. (The old
+   2.5 s credit delay had the right magnitude for the wrong reason.)
+4. **Result: fully stable and honest.** Single conn: 427 chunks, 40
+   cheques, **0 residual, 0 drops**, 0.013 MB/s (4× before). 16 conns:
+   **1751/1769 chunks direct (99%), 0 residual, 0 warnings**, steady
+   ~12.7 chunks/s ≈ 0.05 MB/s aggregate during flow; wall time is
+   straggler-dominated (static queues — work-stealing is M5).
+5. **The remaining gap to 0.23 MB/s/conn is protocol, not code**: a
+   FRESH light connection's settled inflow is capped at ~450k units/s
+   free tier + (337k margin ÷ ~3 s validation) cheque channel ≈
+   0.6–1M units/s ≈ 3–5 chunks/s. Bee **grows** a well-behaved peer's
+   threshold over minutes (announced via pricing, which we parse) and
+   every margin scales with T — Phase-0's 0.23 MB/s/conn was measured
+   in that grown regime. M5: per-peer threshold tracking, per-peer
+   validation-latency probes, work-stealing, long-lived connections.
+Diag spend ≈ 0.003 xBZZ. Cheque acceptance now proven at 231
+cheques/run with zero residual.
+
 **Phase 1 M4-cont (same day): transport reworked — SCALING FIXED.**
 Replaced the single shared swarm with **one libp2p swarm + poller per
 connection**, actors dialed in PARALLEL (churned-storer timeouts now

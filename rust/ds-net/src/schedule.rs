@@ -39,12 +39,33 @@ use crate::direct::{
 use crate::identity::Identity;
 use crate::store::ChunkStore;
 
-/// Uniform mainnet light-peer payment threshold (units). Every storer
-/// we have measured announces this; M5 will parse it per-peer.
-const ASSUMED_THRESHOLD: u64 = 1_350_000;
 const REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(1100);
-const CHEQUE_CREDIT_DELAY: Duration = Duration::from_millis(2500);
+/// Settlement loop tick. Fast: cheque cadence is the throughput.
+const SETTLE_TICK: Duration = Duration::from_millis(50);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(20);
+// Settlement posture, derived from the diagnosed constraint
+// `worst-case bee ledger = cap (debt at emit) + cheque size (refill
+// after our instant credit, while bee still validates) ≤
+// disconnectLimit (1.25 × T = 1.6875 M)`. Bee credits a cheque only
+// after ~4 on-chain calls (~2.5–3 s measured); during that window its
+// ledger runs ahead of ours, and a fresh connection's margin
+// (0.25 × T = 337k units ≈ 1.6 chunks) evaporates at wire rate
+// (measured: 16 chunks in 0.55 s, blocklisted ~200 ms after the
+// cheque). So BOTH terms are bounded — 800k + 600k = 1.4 M < 1.6875 M —
+// we credit our mirror instantly on emit (bee's NotifyPaymentSent
+// semantics), and MIN_CHEQUE_INTERVAL exceeds validation latency so at
+// most one cheque is ever unvalidated. Throughput rises from here with
+// bee's own per-peer threshold growth (bee raises T for well-behaved
+// peers and announces it via pricing — per-peer tracking is the M5
+// lever toward Phase-0's 0.23 MB/s/conn regime).
+const RESERVE_CAP: u64 = 800_000;
+const CHEQUE_TRIGGER: u64 = 500_000;
+const CHEQUE_MAX: u64 = 600_000;
+/// Must exceed the peer's cheque VALIDATION latency (~2.5–3 s measured
+/// — bee makes ~4 on-chain calls per cheque) so at most one cheque is
+/// unvalidated at a time. Per-peer adaptive measurement is the M5
+/// refinement (probe cheque + deduction-header polling).
+const MIN_CHEQUE_INTERVAL: Duration = Duration::from_millis(3000);
 
 #[derive(Debug, Clone)]
 pub struct ScheduleOptions {
@@ -166,13 +187,21 @@ pub async fn fetch_scheduled(
         return Ok(report);
     }
 
-    // Cached invariant read (once) + shared global cheque spend cap.
-    // Each connection keeps its own in-memory outbound cheque ledger
-    // (distinct beneficiary per peer, so no cross-connection sharing is
-    // needed); the ledger_path is reserved for future persistence.
-    let _ = &opts.ledger_path;
+    // Cached invariant read (once) + shared global cheque spend cap +
+    // ONE PERSISTED outbound ledger shared by every connection and
+    // every run. bee's chequestore keeps the highest validated
+    // cumulative per chequebook FOREVER — a fresh in-memory ledger
+    // makes early cheques non-increasing, bee rejects them, debt grows
+    // unsettled, and the peer blocklists us ~10 s in (diagnosed live at
+    // 16 connections against previously-paid peers). Persisting also
+    // repays owed-on-drop residue automatically: our emit-time
+    // cumulative runs ahead of bee's validation-time store, so the next
+    // accepted cheque covers the gap.
     let issuable = read_chequebook_issuable_raw(&opts.rpc_url, opts.chequebook).await?;
     let issued_plur = Arc::new(AtomicU64::new(0));
+    let ledger = Arc::new(ant_p2p::swap::OutboundLedger::open(Some(
+        opts.ledger_path.clone(),
+    )));
     tracing::info!(%issuable, "chequebook cached invariant read once (shared spend cap across connections)");
 
     // Select storers that cover the needed chunks, most-coverage first.
@@ -259,6 +288,7 @@ pub async fn fetch_scheduled(
             chequebook: opts.chequebook,
             issuable,
             issued_plur: issued_plur.clone(),
+            ledger: ledger.clone(),
             max_issue_plur: opts.max_issue_plur,
             depth: opts.start_depth,
             store: store.clone(),
@@ -320,6 +350,8 @@ struct ConnArgs {
     issuable: U256,
     issued_plur: Arc<AtomicU64>,
     max_issue_plur: u64,
+    /// Persisted outbound cheque ledger, shared by all connections.
+    ledger: Arc<ant_p2p::swap::OutboundLedger>,
     depth: usize,
     store: Arc<ChunkStore>,
     fallback: mpsc::UnboundedSender<[u8; 32]>,
@@ -449,7 +481,7 @@ async fn run_connection(a: ConnArgs) -> u64 {
         secret: a.id_secret,
         chequebook: a.chequebook,
         chain_id: a.chain_id,
-        ledger: Arc::new(ant_p2p::swap::OutboundLedger::open(None)),
+        ledger: a.ledger.clone(),
         issuable: a.issuable,
         issued_plur: a.issued_plur.clone(),
         max_issue_plur: a.max_issue_plur,
@@ -597,7 +629,7 @@ async fn fetch_worker(args: FetchArgs) {
         depth,
     } = args;
     let _ = &control;
-    let reserve_cap = ASSUMED_THRESHOLD / 2;
+    let reserve_cap = RESERVE_CAP;
     let inflight = Arc::new(tokio::sync::Semaphore::new(depth.max(1)));
     let mut tasks = tokio::task::JoinSet::new();
     loop {
@@ -638,8 +670,8 @@ async fn fetch_worker(args: FetchArgs) {
                         break Some(g);
                     }
                 }
-                if waited > 80 {
-                    break None; // ~12s stuck → give to fallback
+                if waited > 400 {
+                    break None; // ~60s stuck → give to fallback
                 }
                 waited += 1;
                 tokio::time::sleep(Duration::from_millis(150)).await;
@@ -648,11 +680,19 @@ async fn fetch_worker(args: FetchArgs) {
                 let _ = task_fb.send(addr);
                 return;
             };
+            let t = Instant::now();
             if let Ok(chunk) = retrieve_chunk(&mut task_control, peer_id, addr).await {
+                let retrieve_ms = t.elapsed().as_millis();
                 guard.apply();
                 let _ = task_store.put(addr, &chunk.data);
                 task_bytes.fetch_add(chunk.data.len() as u64, Ordering::Relaxed);
                 task_ok.fetch_add(1, Ordering::Relaxed);
+                tracing::debug!(
+                    target: "m4diag",
+                    reserve_wait_ms = waited * 150,
+                    retrieve_ms,
+                    "chunk"
+                );
             } else {
                 drop(guard);
                 let _ = task_fb.send(addr);
@@ -682,9 +722,9 @@ struct SettleArgs {
 /// when debt crosses trigger, final sweep to zero. Returns residual
 /// unsettled units. Mirrors M2's proven loop with a shared spend cap.
 async fn settlement_driver(mut a: SettleArgs) -> u64 {
-    let trigger = ASSUMED_THRESHOLD / 4; // half of the reserve cap
-    let pending = Arc::new(AtomicU64::new(0));
+    let trigger = CHEQUE_TRIGGER;
     let mut last_refresh: Option<Instant> = None;
+    let mut last_cheque: Option<Instant> = None;
     let mut finishing = false;
     loop {
         if finishing {
@@ -692,15 +732,17 @@ async fn settlement_driver(mut a: SettleArgs) -> u64 {
         } else if !a.conn.alive.load(Ordering::Relaxed) {
             finishing = true;
         } else {
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(SETTLE_TICK).await;
         }
         let debt = a.acct.debug_snapshot(&a.conn.peer_id).map_or(0, |(b, _)| b);
 
         let refresh_due = last_refresh.is_none_or(|t| t.elapsed() >= REFRESH_MIN_INTERVAL);
         if debt > 0 && refresh_due {
+            let t = Instant::now();
             if let Ok(ok) =
                 ant_p2p::pseudosettle::refresh_peer(&mut a.control, a.conn.peer_id).await
             {
+                tracing::debug!(target: "m4diag", accepted = ok.accepted, ms = u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX), debt, "refresh");
                 if ok.accepted > 0 {
                     a.acct.credit(a.conn.peer_id, ok.accepted);
                     a.refresh_units.fetch_add(ok.accepted, Ordering::Relaxed);
@@ -709,14 +751,19 @@ async fn settlement_driver(mut a: SettleArgs) -> u64 {
             last_refresh = Some(Instant::now());
         }
 
-        let debt = a.acct.debug_snapshot(&a.conn.peer_id).map_or(0, |(b, _)| b);
-        let effective = debt.saturating_sub(pending.load(Ordering::Relaxed));
+        let debt_now = a.acct.debug_snapshot(&a.conn.peer_id).map_or(0, |(b, _)| b);
+        // At most one cheque per MIN_CHEQUE_INTERVAL, so at most one
+        // cheque is ever in bee's validation pipeline, and its size is
+        // capped (the safety arithmetic above depends on both).
+        let effective = debt_now.min(CHEQUE_MAX);
+        let cheque_due = last_cheque.is_none_or(|t| t.elapsed() >= MIN_CHEQUE_INTERVAL);
         let should = if finishing {
-            effective > 0
+            effective > 0 && cheque_due
         } else {
-            effective >= trigger
+            debt_now >= trigger && cheque_due
         };
         if should {
+            let t = Instant::now();
             match emit_settlement_cheque(ChequeEmit {
                 control: &mut a.control,
                 peer_id: a.conn.peer_id,
@@ -733,24 +780,16 @@ async fn settlement_driver(mut a: SettleArgs) -> u64 {
             .await
             {
                 Ok(outcome) => {
+                    tracing::debug!(target: "m4diag", units = effective, ms = u64::try_from(t.elapsed().as_millis()).unwrap_or(u64::MAX), "cheque emitted");
                     a.cheques.fetch_add(1, Ordering::Relaxed);
                     a.cheque_plur.fetch_add(
                         u64::try_from(outcome.plur).unwrap_or(u64::MAX),
                         Ordering::Relaxed,
                     );
-                    if finishing {
-                        a.acct.credit(a.conn.peer_id, effective);
-                    } else {
-                        pending.fetch_add(effective, Ordering::Relaxed);
-                        let acct = a.acct.clone();
-                        let pending = pending.clone();
-                        let peer = a.conn.peer_id;
-                        tokio::spawn(async move {
-                            tokio::time::sleep(CHEQUE_CREDIT_DELAY).await;
-                            acct.credit(peer, effective);
-                            pending.fetch_sub(effective, Ordering::Relaxed);
-                        });
-                    }
+                    // Immediate credit on emit success — bee's own
+                    // NotifyPaymentSent semantics.
+                    a.acct.credit(a.conn.peer_id, effective);
+                    last_cheque = Some(Instant::now());
                 }
                 Err(err) => {
                     if finishing {
@@ -762,8 +801,7 @@ async fn settlement_driver(mut a: SettleArgs) -> u64 {
             }
         }
         if finishing {
-            let bal = a.acct.debug_snapshot(&a.conn.peer_id).map_or(0, |(b, _)| b);
-            let residual = bal.saturating_sub(pending.load(Ordering::Relaxed));
+            let residual = a.acct.debug_snapshot(&a.conn.peer_id).map_or(0, |(b, _)| b);
             if residual == 0 {
                 return 0;
             }
