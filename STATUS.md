@@ -36,6 +36,55 @@ sweep, plus chequebook headroom). Suggest topping the wallet to
 |---|---|
 | batch 47265a62 top-up, +4 days TTL | 1.118 xBZZ |
 
+**Phase 1 M2 done (same day): first fully-settled DIRECT storer
+stream on mainnet.** Run 6 against stranger storer `1e9d7cc9…`:
+**200/200 chunks, 0 errors, p50 59 ms / p95 81 ms, 17 SWAP cheques
+(9.63M units = 9.63e11 PLUR ≈ 0.0001 xBZZ) accepted** — acceptance
+proven live by the deduction header dropping 100 → 0 after cheque #1 —
+plus 76 pseudosettle refreshes (34.15M units), connection healthy end
+to end, polite disconnect. Throughput 0.007 MB/s **by design** (probe
+runs safety-paced: reserve cap = announced-threshold/2, 2.5 s cheque
+credit delay; adaptive pacing is M4's job — Phase-0's patched-bee
+client showed ~0.23 MB/s/connection is reachable). Getting here took
+six live runs whose failures are findings:
+- **ant bug (to report upstream): every ant-emitted cheque is rejected
+  by bee** — `encode_signed_cheque_json` quotes `CumulativePayout`,
+  bee unmarshals into Go `math/big.Int` which accepts only an unquoted
+  JSON number ("unmarshal cheque" → cheque discarded). Also ant's
+  `emit_cheque` ignores the swap stream's settlement headers, so even
+  with fixed JSON its amounts are off by the exchange rate (100,000×).
+  Both fixed in ds-net (`emit_cheque_at_rate`, `encode_cheque_json_bee`,
+  unit-tested); ant issue/PR to propose (user review first — Phase-2
+  style gate applies to any upstream posting).
+- **Cheque-credit lag is a real protocol hazard**: bee credits a
+  cheque only after ~4 on-chain validation calls; a payer that runs at
+  the threshold (or ant's disconnect-limit cap) overruns bee's ledger
+  during that lag and gets blocklisted (runs 3–5: bee peaked +22k
+  units over its 1.6875M limit). Mirroring bee's own early-payment
+  posture (cap = T/2) makes the worst-case refill burst peak at ~T,
+  safely under 1.25T.
+- Pricing threshold parse (M2 deliverable) works: peers announce
+  1,350,000 units and rate 100,000 PLUR/unit + one-time deduction 100.
+- Residual 450k units on run 6 = spend guard (1e12 PLUR cap) rightly
+  refusing to exceed budget but thereby blocking the final settlement
+  sweep — design fix queued (guard must stop fetching, not settling);
+  default raised to 5e12.
+- Cost reality check for Phase 2 economics: full cheque settlement at
+  today's rate ≈ 2.2e10 PLUR per 1-hop chunk → **~0.58 xBZZ/GiB when
+  cheque-settled** (the pseudosettle free tier covers ~4% at target
+  speeds). Phase-0's tiny settlement spends reflect free-tier subsidy
+  at low rates, not the real price.
+- Open M2 items → M3/M4: 10 s handshake (V15 open likely timing out
+  before V14 fallback — log/measure), adaptive credit-lag pacing,
+  threshold-growth tracking, spend-guard fetch-gating.
+Spike identity reused (eth 0xDEdAc9…, chequebook 0xE8C7aD…, fresh
+persisted overlay nonce); cheque spend this session ≈ **0.00014 xBZZ
+ledgered** (runs 1–5 cheques were rejected by peers and cannot be
+cashed; run 6's 0.0001 xBZZ is live). Blocklist etiquette: runs 1–5
+each tripped one storer's accounting blocklist (short, escalating
+timer, self-healing) — all on distinct peers, stopped immediately on
+diagnosis, no retries against blocked peers.
+
 **Phase 1 M1 done (same day): `directswarm fetch` works, byte-verified.**
 End-to-end fetch of the 1 GiB payload over the forwarding-fallback path
 (ant streaming joiner + our `BeeApiFetcher` over bee `/chunks`, every
