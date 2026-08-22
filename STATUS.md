@@ -25,13 +25,16 @@ parallel peers → 0.074/0.149/0.251 MB/s aggregate — sublinear because
 calls under one global mutex on every cheque (~5–6 cheques/s per
 client; verified in source, `reserveTotalIssued`→`AvailableBalance`)**;
 the marginal gain at high peer counts is stacked pseudosettle free
-tier, labeled as such, never a strategy. Fix hierarchy in
-REPORT-phase0.md: per-beneficiary issuance locking (client-side,
-protocol-compliant → ~0.28 MB/s paid per connection → ~90 connections
-reach 25 MB/s at today's thresholds) + upstream threshold policy (10×
-further). **Phase-0 measurement set complete; human review gate open
-on the exit decision** (upstream write-up scope + whether Phase 1
-starts with per-beneficiary settlement as its first work item).
+tier, labeled as such, never a strategy. Fix built and MEASURED: ~50-line cached-invariant patch (bee branch
+`chequebook-cached-balance`, worktree `.phase0/bee-patched`) →
+5-peer 0.155→1.08 MB/s (7×), 20-peer 0.277→**4.56 MB/s (16×)**,
+cheques 5/s→62/s node-wide, aggregate now ~linear in connections;
+25 MB/s target needs ~110 connections at today's thresholds, fully
+settled. Bee issue drafted with before/after numbers
+(`upstream/bee-issue-chequebook-serialization.md`), self-contained (no
+directswarm disclosure), PR offered on request — **awaiting user
+approval to file**. Retrieval settlement spend now ~0.01 xBZZ total.
+**Phase-0 measurement set complete; human review gate open.**
 
 **Spend total this phase: ~1.17 xBZZ** (0.880 postage + 0.286 upload
 settlement + 0.0065 retrieval settlement + gas dust). Balances:

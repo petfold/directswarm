@@ -186,15 +186,20 @@ flags as a loophole to report, not a strategy. Labeled accordingly:
 
 The fix hierarchy, and why the design survives:
 
-1. **Client-side, protocol-compliant**: cache `balance + totalPaidOut`
-   (refresh only on own deposits/withdrawals) so balance reservation
-   is pure memory, and order issuance per beneficiary (cumulative
-   cheques only need per-beneficiary ordering). Each connection's
-   cheque cadence then becomes its own wire-RTT-bound ~11 cheques/s ≈
-   ~0.28 MB/s paid per connection — ~90 connections reach the 25 MB/s
-   target at today's thresholds. Phase-1 engineering in our own client
-   (wire protocol and contract semantics untouched), plus a small
-   upstream performance issue/PR for bee itself.
+1. **Client-side, protocol-compliant — now MEASURED, not estimated**:
+   a ~50-line patch caching `balance + totalPaidOut` (invariant under
+   cash-outs; decreases only via the issuer's own `onlyIssuer`
+   withdraw; external deposits only increase it, so staleness errs
+   strictly toward under-issuance) removes the per-cheque RPCs.
+   Re-running the same concurrent measurements with the patched
+   chequebook: 5 peers 0.155 → **1.08 MB/s (7×)**; 20 peers 0.277 →
+   **4.56 MB/s (16×)**, per-peer median 0.231 MB/s, cheque cadence
+   62/s node-wide (~3/s per peer, wire-bound). Aggregate now scales
+   ~linearly with connections; the 25 MB/s Phase-1 target needs ~110
+   connections at today's thresholds, fully settled. Patch on local
+   branch `chequebook-cached-balance`; issue draft (with these
+   numbers) in `upstream/bee-issue-chequebook-serialization.md`,
+   PR offered on request.
 2. **Upstream policy**: light-peer threshold scaling with demonstrated
    settlement lifts the per-connection ceiling ~10× further (ties
    directly into the funding-is-not-incentivised report).
