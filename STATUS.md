@@ -1,5 +1,63 @@
 # directswarm — STATUS
 
+## 2026-08-22 — pre-flight approvals; design stage closed
+
+Human approvals, defaults accepted: **Q5 posture confirmed** (spike
+quietly — protocol-compliant, paid, polite — propose with data at
+Phase 2, whole direction disclosed); **Q20a** test payload = fresh
+1 GiB deterministic payload, mutable batch, ~1 week TTL (~0.5–1 xBZZ
+postage + ~2.5 h upload); **Q20b** fresh dedicated spike chequebook
+(~1–2 xBZZ + xDAI gas to deploy/fund); **Q20c** etiquette caps
+proposed and blessed at spike start; **Q20d** license =
+**BSD-3-Clause** (LICENSE file added).
+
+New operational permissions from the user (CLAUDE.md updated):
+starting/stopping nodes is authorized; warn in advance when a speed
+test needs the laptop on Ethernet (wifi not fully reliable); warn when
+wallet balances run low so the user can top up.
+
+**Design stage is closed.** Next session starts Phase 0: Bee node up +
+funded, payload upload, chequebook deployment — each with a spend
+estimate first, balances snapshotted around measured runs.
+
+**Spend this session:** 0 xBZZ.
+
+## 2026-08-22 — design revision 2.4: substrate resolved (Rust); browser reality
+
+**Built:** nothing — design stage.
+
+**Done:** resolved the substrate posture (Q4) and recorded the
+browser/Wasm analysis:
+
+- **Product in Rust (extend ant)**, decided by the browser endgame:
+  rust-libp2p ships browser transports (websocket/webtransport/
+  webrtc-websys), wasm32 is first-class, PyO3 covers Python bindings
+  for swarmfs/weightstation. Go compiles to Wasm but go-libp2p has no
+  browser-transport story and bee-as-library cannot run in a page —
+  bee's value is the fast Phase-0 spike (throwaway) and wire-semantics
+  reference. Spike stays substrate-agnostic.
+- **Day-one discipline, not a later deliverable**: sans-I/O core crate
+  behind a transport trait (native tokio adapter now, websys later);
+  wasm32 kept compiling in CI from the first commit.
+- **Browser transport reality recorded** (DESIGN.md "Form factor"):
+  pages can't dial raw TCP/QUIC, storers listen on nothing else today
+  (ws flag ~unused; wss needs certs), so the in-page client becomes
+  realistic at Phase 4 where we control both endpoints (seeds/peers on
+  WebTransport/WebRTC). New Phase-2 upstream ask: browser-dialable
+  listeners on full nodes (WebTransport certhash — config, not
+  protocol).
+- **New Q20 (H), "Pre-flight"**: what must be settled before Phase-0
+  code touches mainnet — test payload (weightstation batches
+  lapsed/lapsing; fresh upload, mutable batch, ~0.5–1 xBZZ + ~2.5 h),
+  dedicated spike chequebook (+~1–2 xBZZ + gas to approve), etiquette
+  caps sign-off, license pick before first code push.
+
+**Measured:** nothing. **Spend:** 0 xBZZ. **Deviations:** none.
+
+**Open items:** blocking before development: Q20 (a–d) and Q5 posture
+confirmation. Everything else (fallback semantics, resume format, CLI
+shape, Phase-4 questions) decides during or after Phase 0/1.
+
 ## 2026-08-22 — design revision 2.3: latency-aware source selection
 
 **Built:** nothing — design stage.

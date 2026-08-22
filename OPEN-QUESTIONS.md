@@ -5,7 +5,8 @@ in STATUS.md. Rev 2 (2026-08-21) added the fast-plane questions; rev
 2.1 (same day) removed the streaming-specific ones (streaming demoted —
 DESIGN.md "Deferred: live streams") and recorded answers verified
 against the bee source; rev 2.2 (same day) added the ecosystem
-questions 14–15 (meta renumbered 16–19).
+questions 14–15 (meta renumbered 16–19); rev 2.4 (2026-08-22) resolved
+Q4's substrate posture and added the pre-flight section (Q20).
 
 ## Existential (Phase 0 answers these)
 
@@ -29,17 +30,25 @@ questions 14–15 (meta renumbered 16–19).
 
 ## Bulk design
 
-4. **(C) Substrate**: extend ant (Rust) vs bee-as-Go-library vs
-   clean-room libp2p. Spike may differ from product; measure per-chunk
-   CPU cost on each candidate (Bee spends ~10 CPU-ms/chunk; BMT itself
-   is microseconds — how lean can the client be?).
+4. **(C) Substrate — posture resolved 2026-08-22; measurements
+   remain.** Product: **Rust** (extend ant), decided by the
+   browser/Wasm endgame — rust-libp2p ships browser transports,
+   wasm32 is first-class, PyO3 covers the Python bindings swarmfs and
+   weightstation need; Go compiles to Wasm but go-libp2p has no
+   browser-transport story and bee-as-library cannot run in a page.
+   Spike: whatever measures fastest (likely bee-as-Go-library;
+   throwaway). Discipline: sans-I/O core behind a transport trait,
+   wasm32 kept building in CI from day one (DESIGN.md, "Form factor").
+   Still to measure: per-chunk CPU cost per candidate (Bee spends
+   ~10 CPU-ms/chunk; BMT itself is microseconds — how lean can the
+   client be?).
 5. **(H) Upstream-first or client-first?** Building first produces
    evidence but risks community friction (forwarder-earnings bypass);
    proposing first risks debating without data. Current plan: spike
    quietly (protocol-compliant, paid, polite), propose with data at
    Phase 2 — with the *whole* direction (rendezvous, audience serving,
    non-storer pricing) disclosed in that write-up, not drip-fed.
-   Confirm this posture.
+   **Confirmed by the human 2026-08-22.**
 6. **(C) Crawl etiquette**: rate limits, cache TTLs, dial budgets that
    keep a fetch from looking like an attack. RTT probing (stock
    pingpong) draws from the same dial budget; also choose the
@@ -112,8 +121,9 @@ questions 14–15 (meta renumbered 16–19).
     handoff; alternatives considered: `beeline` (collides with Apache
     Hive's CLI), `waggle` (bee dance that communicates locations —
     apt but cute). Rename cheap until first release.
-17. **(H) License** — sisters vary (freedom-browser MPL-2.0); pick
-    before first push of implementation code.
+17. **(H) License — resolved 2026-08-22: BSD-3-Clause** (matches bee,
+    minimizing friction for the upstream endgame; LICENSE file added).
+    Sisters vary (freedom-browser MPL-2.0).
 18. **(H) Repo home** — starts under `petfold/` like weightstation and
     swarmfs; move to an org if/when it becomes a Solar Punk deliverable.
 19. **(H) Relationship to the incentive findings**: weightstation's
@@ -122,3 +132,28 @@ questions 14–15 (meta renumbered 16–19).
     that issue is filed. (Rev-2 note: audience serving *adds* a reason
     to fix it — paid serving only competes if paying is actually how
     you get served.)
+
+## Pre-flight (settle before Phase-0 code touches mainnet)
+
+20. **(H) Phase-0 prerequisites — all spend or touch the live network:**
+    (a) **Test payload**: weightstation's test batches were short-TTL
+    and have lapsed or are about to, so Phase 0 needs a fresh
+    known-provenance upload — deterministic payload, mutable batch
+    (immutable can't be diluted), size and TTL to pick; roughly
+    0.5–1 xBZZ postage plus ~2.5 h upload for 1 GiB at stock rates.
+    (b) **Spike settlement identity**: a fresh dedicated chequebook
+    (never the Bee node's — concurrent cheque issuance against one
+    contract conflicts); deployment + funding amount to approve
+    (~1–2 xBZZ + xDAI for gas). (c) **Etiquette caps sign-off**:
+    concrete crawl/dial/measurement budgets proposed at spike start —
+    per CLAUDE.md, when in doubt about load, ask. (d) **License**
+    (Q17) must be picked before the first push of implementation code.
+
+    **Defaults approved by the human 2026-08-22:** (a) fresh 1 GiB
+    deterministic payload on a mutable batch, ~1 week TTL; (b) fresh
+    dedicated chequebook, ~1–2 xBZZ + xDAI gas; (c) caps proposed and
+    blessed at spike start; (d) BSD-3-Clause. Operational permissions
+    granted at the same time: nodes may be started/stopped by the
+    agent; warn the user in advance when a speed test needs the laptop
+    on Ethernet (wifi not fully reliable); warn when wallet balances
+    run low so the user can top up.

@@ -103,7 +103,11 @@ mode for seeding) — **not an add-on to bee**, which has no plugin
 mechanism, and never a fork of it. A local Bee node is an optional
 companion (the forwarding fallback), not a requirement or a bundle:
 directswarm has its own overlay identity and its own funded
-chequebook. If upstream adopts the direct retrieval strategy, the
+chequebook. Written in Rust with a sans-I/O core, so the same code
+also compiles to Wasm: a no-install, in-browser fetch of a large file
+is a planned adapter — realistic once seeds and peers listen on
+browser-reachable transports (Phase 4), since today's storers are
+dialable only natively. If upstream adopts the direct retrieval strategy, the
 capability lands inside stock bee for everyone, and directswarm's
 remaining role is reference implementation and measurement harness.
 

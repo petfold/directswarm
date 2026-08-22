@@ -65,9 +65,13 @@ audience-serving, and non-storer-pricing sketches so the community
 sees the whole direction, not a drip-feed. The write-up also carries
 the systemic-adoption analysis and posture question (embrace /
 constrain / segment — OPEN-QUESTIONS 15), the anonymity reassessment
-(DESIGN.md), and the strengthening argument: use cases currently
+(DESIGN.md), the strengthening argument (use cases currently
 infeasible on Swarm bring traffic, settlement revenue, and postage
-demand. **Human review before publishing anything.**
+demand), and the browser-reachability ask: full nodes offering a
+browser-dialable listener (WebTransport with certhash — configuration
+of an existing go-libp2p capability, not a protocol change), without
+which no in-page client can ever reach storers. **Human review before
+publishing anything.**
 
 ## Phase 3 — Integration + upload spike
 

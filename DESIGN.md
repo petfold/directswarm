@@ -9,7 +9,9 @@ in protocol facts verified against the bee source. Rev 2.2 (same day)
 records the deployment form factor, the systemic-adoption analysis
 ("would it overtake the network?"), and a reassessment of the
 anonymity trade. Rev 2.3 (2026-08-22) adds latency-aware source
-selection.
+selection. Rev 2.4 (same day) resolves the substrate posture (Rust
+product, sans-I/O core, Wasm kept buildable) and records the
+browser-transport reality.
 
 ## The problem, restated
 
@@ -372,9 +374,28 @@ custody is OPEN-QUESTIONS 7).
 
 Deliverable shape: a **core library plus a thin CLI**. The library
 form is load-bearing — both consumers are libraries (weightstation's
-core/ backend, swarmfs's fsspec adapter; both Python, so an ant/Rust
-substrate implies bindings). Phase 4 adds a daemon mode: fetching is a
-one-shot run, but seeding requires a long-lived process.
+core/ backend, swarmfs's fsspec adapter; both Python, so the Rust
+substrate implies PyO3 bindings). Phase 4 adds a daemon mode: fetching
+is a one-shot run, but seeding requires a long-lived process.
+
+**Browser (Wasm) endgame.** A user who needs one or two large files
+won't install a client; a no-install, in-page fetch is a stated goal —
+and it constrains the substrate, not the schedule. Rust is the
+decisive choice here: rust-libp2p ships real browser transports
+(websocket/webtransport/webrtc-websys), wasm32 is first-class, and the
+sans-I/O core compiles to both targets; Go compiles to Wasm but
+go-libp2p has no supported browser-transport story, and bee-as-library
+can never run in a page. The hard constraint is transports, not
+language: a browser cannot dial raw TCP/QUIC, and today's storers
+listen on nothing else (bee's `p2p-ws-enable` is ~unused, and wss from
+an https page needs TLS certificates storers don't have). So the
+browser client becomes realistic with **Phase 4**, where we control
+both endpoints — seeds and audience peers listen on WebTransport/
+WebRTC — while storer-direct fetching stays native. Getting full nodes
+browser-dialable (WebTransport with certhash — configuration/adoption
+of an existing go-libp2p capability, not a protocol change) joins the
+Phase-2 upstream asks. Large-file sinks in a page are workable via
+OPFS / File System Access streaming writes.
 
 A local Bee node is an **optional companion, never a bundle**: it is
 used for exactly one thing — the forwarding fallback (required vs
@@ -404,12 +425,15 @@ remaining role is reference implementation and measurement harness.
    retry across sources; forwarding fallback; resume from verified
    state.
 4. **transport/** — libp2p dial + Bee handshake + retrieval +
-   settlement. Substrate decision (OPEN-QUESTIONS 4): extend **ant**
-   (Rust; stack exists, Solar Punk codebase; needs multi-peer
-   scheduler) vs. import **bee as a Go library** (protocols come free;
-   carries bee's ~10 CPU-ms/chunk measured overhead) vs. clean-room
-   libp2p client (most control, most work). The Phase-0 spike may be
-   quickest via bee-as-library; the product likely wants ant/Rust.
+   settlement. Substrate posture (resolved 2026-08-22, OPEN-QUESTIONS
+   4): the **product is Rust** (extend ant), decided by the
+   browser/Wasm endgame; the **Phase-0 spike uses whatever measures
+   fastest** (likely bee-as-Go-library; throwaway allowed). Structural
+   rule from day one: a **sans-I/O core** (scheduler, BMT, manifest
+   walking, accounting/cheque logic — no sockets, no owned clocks)
+   behind a transport trait, with a native (tokio/TCP) adapter now and
+   a browser (websys) adapter later; `wasm32` kept compiling in CI
+   even before anything browser-facing ships.
 5. **verify/** — BMT per chunk (microseconds); whole-object integrity
    via the manifest; identical guarantees to stock retrieval.
 6. **bench/** — wsbench-compatible output (same CSV vocabulary,

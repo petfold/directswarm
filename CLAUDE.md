@@ -14,10 +14,13 @@ measured findings in the sister repo — read
 
 ## Environment
 
-- Live Swarm mainnet work requires the user's funded Bee node
+- Live Swarm mainnet work uses the user's funded Bee node
   (http://localhost:1633) for bootstrap/fallback and a funded
-  chequebook for settlement — **warn the user to start it when needed;
-  never install or start nodes unprompted.**
+  chequebook for settlement. **Starting/stopping nodes is authorized
+  (user grant, 2026-08-22)** — but warn the user in advance when a run
+  needs the laptop on Ethernet (speed tests; wifi is not fully
+  reliable), and **warn when wallet balances run low** so the user can
+  top up.
 - Gnosis chain RPC: https://rpc.gnosischain.com (public, rate-limited).
 - Sister codebases to reuse, not reinvent: `../weightstation/bench`
   (wsbench harness, deterministic payloads, honesty rules),
