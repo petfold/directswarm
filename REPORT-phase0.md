@@ -153,6 +153,44 @@ better-evidenced claim than either planned exit; (c) both, concurrency
 first. Phase 1 (fetcher MVP) should not start before (a), since the
 scheduler's whole design assumes concurrency delivers the aggregate.
 
+## Addendum: aggregate concurrency measurement (same day, user-approved)
+
+Depth 32, whole per-peer chunk sets, all peers in parallel:
+
+| concurrent peers | aggregate MB/s | median per-peer MB/s | note |
+|---|---|---|---|
+| 1 (from sequential run) | 0.074 | 0.074 | baseline |
+| 5  | 0.149 | 0.031 | |
+| 20 | 0.251 | 0.013 | majority of marginal gain is free-tier refresh |
+
+**Aggregate does not scale with connections today, and the reason is
+client-side:** bee's chequebook service serializes cheque issuance
+under one mutex held across the entire sign-and-send round trip
+(~90 ms), capping the whole client at ~5–6 cheques/s regardless of
+peer count (the identical global cheque counters across concurrent
+rows are the fingerprint; in concurrent-mode CSVs the cheque columns
+are global-window values, not per-peer). Per-peer pseudosettle refresh
+DOES stack (each peer grants 450k units/s), which is why aggregate
+creeps up with peer count — but that marginal throughput is free-tier
+funded: exactly the per-peer credit aggregation weightstation's report
+flags as a loophole to report, not a strategy. Labeled accordingly:
+**the honest paid-aggregate ceiling of a stock-chequebook client is
+~0.1–0.15 MB/s regardless of connection count.**
+
+The fix hierarchy, and why the design survives:
+
+1. **Client-side, protocol-compliant**: cumulative cheques only need
+   ordering *per beneficiary*; the global mutex is an implementation
+   convenience. Per-beneficiary issuance locking makes each
+   connection's cheque cadence its own wire-RTT-bound ~11 cheques/s ≈
+   ~0.28 MB/s paid per connection — then ~90 connections reach the
+   25 MB/s target at today's thresholds. This is Phase-1 engineering
+   in our own client (bee-as-library's lock replaced, wire protocol
+   untouched), plus a small upstream patch suggestion to bee.
+2. **Upstream policy**: light-peer threshold scaling with demonstrated
+   settlement lifts the per-connection ceiling ~10× further (ties
+   directly into the funding-is-not-incentivised report).
+
 ## Caveats
 
 Sample of 10 storers from a reachability-biased record set; single

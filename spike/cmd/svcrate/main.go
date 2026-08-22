@@ -116,6 +116,7 @@ func main() {
 		minPO    = flag.Int("min-po", 9, "minimum proximity order of chunk to target overlay")
 		seed     = flag.Int64("seed", 1, "deterministic shuffle seed")
 		listen   = flag.String("listen", ":0", "libp2p listen address")
+		conc     = flag.Bool("concurrent", false, "measure all picked peers in parallel (aggregate mode)")
 	)
 	flag.Parse()
 
@@ -140,9 +141,10 @@ func main() {
 			out:      *out,
 			maxMins:  *maxMins,
 			pause:    *pause,
-			minPO:    uint8(*minPO),
-			seed:     *seed,
-			listen:   *listen,
+			minPO:      uint8(*minPO),
+			seed:       *seed,
+			listen:     *listen,
+			concurrent: *conc,
 		})
 	default:
 		err = fmt.Errorf("unknown --mode %q (want addr|init|chunks|measure)", *mode)
@@ -413,20 +415,21 @@ func runChunks(payloadPath, chunksPath string) error {
 // --- mode measure ---
 
 type measureOpts struct {
-	dataDir  string
-	rpc      string
-	targets  string
-	chunks   string
-	peersN   int
-	depths   string
-	secs     int
-	maxBytes int64
-	out      string
-	maxMins  int
-	pause    int
-	minPO    uint8
-	seed     int64
-	listen   string
+	dataDir    string
+	rpc        string
+	targets    string
+	chunks     string
+	peersN     int
+	depths     string
+	secs       int
+	maxBytes   int64
+	out        string
+	maxMins    int
+	pause      int
+	minPO      uint8
+	seed       int64
+	listen     string
+	concurrent bool
 }
 
 type target struct {
@@ -883,6 +886,43 @@ func runMeasure(o measureOpts) error {
 	defer closeCSV()
 
 	var results []runResult
+	if o.concurrent {
+		// aggregate mode: all picked peers measured simultaneously —
+		// the whole point is whether per-connection settlement ceilings
+		// stack across independent connections
+		var (
+			wg    sync.WaitGroup
+			resMu sync.Mutex
+		)
+		aggStart := time.Now()
+		for _, tgt := range picked {
+			wg.Add(1)
+			go func(tgt target) {
+				defer wg.Done()
+				peerRuns := measurePeer(runCtx, logger, p2ps, notifier, acc, priceSvc, counting, swapService, pseudosettleService, tgt, chunks, depths, o)
+				resMu.Lock()
+				results = append(results, peerRuns...)
+				resMu.Unlock()
+			}(tgt)
+		}
+		wg.Wait()
+		aggWall := time.Since(aggStart).Seconds()
+		var totBytes, totOK int64
+		sumRates := 0.0
+		for _, r := range results {
+			if err := writeResultRow(csvW, r); err != nil {
+				return fmt.Errorf("write result: %w", err)
+			}
+			totBytes += r.bytes
+			totOK += r.ok
+			sumRates += r.mbPerSec()
+		}
+		fmt.Printf("\nAGGREGATE concurrent=%d peers: %.3f MB/s bytes-over-wall (%.1f MB in %.1fs incl. graces), sum of per-peer steady rates %.3f MB/s, %d chunks ok\n",
+			len(picked), float64(totBytes)/1e6/aggWall, float64(totBytes)/1e6, aggWall, sumRates, totOK)
+		summarizeMeasure(os.Stdout, results, depths)
+		return nil
+	}
+
 	for i, tgt := range picked {
 		if runCtx.Err() != nil {
 			logger.Warning("global timeout, stopping peer loop", "done", i, "picked", len(picked))

@@ -19,12 +19,18 @@ Full report: **REPORT-phase0.md** (raw CSVs in `.phase0/`). Headline:
   mount pricing AND hive to be tolerated at all; depth-100 pipelines
   push peers to disconnect-limit (cap 32 in future).
 
-**Awaiting human review (CLAUDE.md Phase-0 gate):** proposed next step
-is the aggregate-concurrency measurement (5–20 parallel storers,
-depth ≤32 — needs a fresh etiquette blessing), then fold everything
-into the Phase-2 upstream write-up ("storers are open; the credit
-policy is the funnel"). Phase 1 should not start before the
-concurrency result.
+**Aggregate concurrency measured (user-approved option 1):** 1/5/20
+parallel peers → 0.074/0.149/0.251 MB/s aggregate — sublinear because
+**bee's chequebook serializes cheque issuance under one global mutex
+held across the sign-and-send round trip (~5–6 cheques/s per client)**;
+the marginal gain at high peer counts is stacked pseudosettle free
+tier, labeled as such, never a strategy. Fix hierarchy in
+REPORT-phase0.md: per-beneficiary issuance locking (client-side,
+protocol-compliant → ~0.28 MB/s paid per connection → ~90 connections
+reach 25 MB/s at today's thresholds) + upstream threshold policy (10×
+further). **Phase-0 measurement set complete; human review gate open
+on the exit decision** (upstream write-up scope + whether Phase 1
+starts with per-beneficiary settlement as its first work item).
 
 **Spend total this phase: ~1.17 xBZZ** (0.880 postage + 0.286 upload
 settlement + 0.0065 retrieval settlement + gas dust). Balances:
