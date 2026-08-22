@@ -36,6 +36,23 @@ sweep, plus chequebook headroom). Suggest topping the wallet to
 |---|---|
 | batch 47265a62 top-up, +4 days TTL | 1.118 xBZZ |
 
+**Phase 1 M0 done (same session):** `solardev-xyz/ant` cloned to
+`~/projects/ant` (@ c526a33) and surveyed crate-by-crate;
+**PLAN-phase1.md** written (build-vs-reuse map, milestones M0–M5,
+risks). Rust workspace scaffolded under `rust/` — `ds-core` (sans-I/O,
+first module: overlay proximity/neighborhood math, 6 tests),
+`ds-net` (native adapter, empty shell), `ds-cli` (`directswarm`
+binary stub) — with CI (fmt, clippy -D warnings, tests, and a
+`wasm32-unknown-unknown` check of ds-core) green locally from the
+first commit. Key survey facts driving the plan: ant's retrieval path
+settles via pseudosettle only (no cheques — collides with principle 1;
+we build the retrieval-side SWAP trigger with the cached-invariant
+balance check, candidate upstream contribution), pricing thresholds
+are drained unparsed (we parse them), and ant has no sans-I/O/wasm
+story (our workspace shape supplies it). Next: **M1** — end-to-end
+`directswarm fetch` over the local-bee fallback path, byte-verified
+against the Phase-0 payload.
+
 ## 2026-08-22 — PHASE 0 MEASUREMENTS COMPLETE — human review gate open
 
 Full report: **REPORT-phase0.md** (raw CSVs in `.phase0/`). Headline:
