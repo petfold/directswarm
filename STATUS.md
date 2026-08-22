@@ -36,6 +36,32 @@ sweep, plus chequebook headroom). Suggest topping the wallet to
 |---|---|
 | batch 47265a62 top-up, +4 days TTL | 1.118 xBZZ |
 
+**Phase 1 M1 done (same day): `directswarm fetch` works, byte-verified.**
+End-to-end fetch of the 1 GiB payload over the forwarding-fallback path
+(ant streaming joiner + our `BeeApiFetcher` over bee `/chunks`, every
+chunk CAC/SOC-validated in our code): SHA-256 of the output **exactly
+matches** the independently generated wsbench seed-1 reference
+(`aa9e07db…5c0f`), across a deliberately interrupted run + resume —
+sidecar committed at byte 176,160,768, unverified tail truncated,
+resumed with a range-join, sidecar removed on completion. Honest
+labels: transport was the LOCAL bee node, **cache-warm** (payload
+still in its localstore from upload) — 14.5 MB/s average is a
+correctness figure, NOT a retrieval benchmark; cold `/chunks` is very
+slow (~2 chunks in 25 s observed — bee does a full network retrieval
+per request, serialized behind the joiner's fanout of 16), which is
+fine for a residual-chunk fallback but confirms the fast plane is the
+throughput story. Curiosity for later: a full-file `/bytes` GET on
+bee 2.8 stalled (43 KB delivered in 13 min) while range requests
+served briskly — not investigated, noted only. Settlement: run was
+almost entirely cache-served; whatever residual network retrieval bee
+did, it settled itself (dust, unmeasured, non-benchmark run).
+Toolchain note: rustup stable updated 1.86 → 1.98 (reqwest transitive
+deps require ≥1.88). User informed the host disk is ~100% full
+(2.7 GB free); the 1 GiB verify artifact was deleted after hashing.
+Next: **M2** — one settled direct storer stream (dial, handshake,
+retrieval + accounting + pseudosettle + cached-invariant cheque
+issuance via the spike chequebook 0xE8C7aD…).
+
 **Phase 1 M0 done (same session):** `solardev-xyz/ant` cloned to
 `~/projects/ant` (@ c526a33) and surveyed crate-by-crate;
 **PLAN-phase1.md** written (build-vs-reuse map, milestones M0–M5,
