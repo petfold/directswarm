@@ -16,6 +16,8 @@ pub mod fetch;
 pub mod hive;
 pub mod identity;
 pub mod keystore;
+pub mod schedule;
+pub mod store;
 
 pub use bee_api::BeeApiFetcher;
 pub use direct::{probe_storer, ProbeOptions, ProbeReport, ProbeTarget};

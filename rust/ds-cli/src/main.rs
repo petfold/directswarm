@@ -4,6 +4,7 @@
 //! fallback (local bee node); the fast plane layers in from M2.
 
 mod crawl;
+mod fetchdirect;
 mod probe;
 
 use clap::{Parser, Subcommand};
@@ -41,6 +42,8 @@ enum Command {
     ProbeStorer(Box<probe::ProbeArgs>),
     /// M3: bounded polite hive crawl building the topology cache.
     Crawl(Box<crawl::CrawlArgs>),
+    /// M4: multi-connection settled fetch across the topology cache.
+    FetchDirect(Box<fetchdirect::FetchDirectArgs>),
 }
 
 fn parse_ref(reference: &str) -> Result<[u8; 32], String> {
@@ -79,6 +82,10 @@ async fn main() {
         }
         Command::Crawl(args) => {
             let code = crawl::run(*args).await;
+            std::process::exit(code);
+        }
+        Command::FetchDirect(args) => {
+            let code = fetchdirect::run(*args).await;
             std::process::exit(code);
         }
     }

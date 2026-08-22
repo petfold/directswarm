@@ -355,7 +355,7 @@ struct Behaviour {
     ping: ping::Behaviour,
 }
 
-fn extract_peer_id(addr: &Multiaddr) -> Option<PeerId> {
+pub(crate) fn extract_peer_id(addr: &Multiaddr) -> Option<PeerId> {
     addr.iter().find_map(|p| {
         if let libp2p::multiaddr::Protocol::P2p(peer) = p {
             Some(peer)
@@ -366,8 +366,18 @@ fn extract_peer_id(addr: &Multiaddr) -> Option<PeerId> {
 }
 
 async fn read_chequebook_issuable(opts: &ProbeOptions) -> Result<U256> {
-    let client = ant_chain::ChainClient::new(opts.rpc_url.clone());
-    let to = format!("0x{}", hex::encode(opts.chequebook));
+    read_chequebook_issuable_raw(&opts.rpc_url, opts.chequebook).await
+}
+
+/// Cached-invariant read: `balance + totalPaidOut` of our chequebook,
+/// the ceiling on cumulative payout across all beneficiaries. One
+/// on-chain read; invariant under cash-outs (see module docs).
+pub(crate) async fn read_chequebook_issuable_raw(
+    rpc_url: &str,
+    chequebook: [u8; 20],
+) -> Result<U256> {
+    let client = ant_chain::ChainClient::new(rpc_url.to_owned());
+    let to = format!("0x{}", hex::encode(chequebook));
     let mut total = U256::zero();
     for selector in [
         ant_chain::chequebook::chequebook_balance_selector(),
@@ -432,6 +442,17 @@ async fn handshake_with_fallback(
     dialed_addr: &Multiaddr,
     opts: &ProbeOptions,
 ) -> Result<ant_p2p::HandshakeInfo> {
+    handshake_with_fallback_raw(control, id, peer_id, dialed_addr, opts.network_id).await
+}
+
+/// BZZ handshake as an honest light node, V15 then V14 on failure.
+pub(crate) async fn handshake_with_fallback_raw(
+    control: &mut Control,
+    id: &Identity,
+    peer_id: PeerId,
+    dialed_addr: &Multiaddr,
+    network_id: u64,
+) -> Result<ant_p2p::HandshakeInfo> {
     use ant_crypto::HandshakeWireVersion;
     for (proto, version) in [
         (ant_p2p::PROTOCOL_HANDSHAKE_V15, HandshakeWireVersion::V15),
@@ -453,7 +474,7 @@ async fn handshake_with_fallback(
             peer_id,
             &id.secret,
             &id.nonce,
-            opts.network_id,
+            network_id,
             std::slice::from_ref(dialed_addr),
             Vec::new(),
             false, // honest light node — Phase 0 proved cheques land from light strangers
@@ -501,7 +522,10 @@ fn mount_sinks(control: &mut Control, threshold_tx: watch::Sender<Option<U256>>)
 /// Bee-headers framing (mirrors ant's private `sinks::drain_stream`):
 /// read the dialer's Headers, reply with empty Headers (varint 0), read
 /// the body, half-close, drain to EOF.
-async fn read_sink_body(stream: &mut libp2p::Stream, max: usize) -> std::io::Result<Vec<u8>> {
+pub(crate) async fn read_sink_body(
+    stream: &mut libp2p::Stream,
+    max: usize,
+) -> std::io::Result<Vec<u8>> {
     let _their_headers = read_delimited(stream, 8 * 1024).await?;
     stream.write_all(&[0u8]).await?;
     stream.flush().await?;
@@ -525,7 +549,10 @@ async fn read_sink_body(stream: &mut libp2p::Stream, max: usize) -> std::io::Res
     }
 }
 
-async fn run_pricing_sink(mut incoming: IncomingStreams, tx: watch::Sender<Option<U256>>) {
+pub(crate) async fn run_pricing_sink(
+    mut incoming: IncomingStreams,
+    tx: watch::Sender<Option<U256>>,
+) {
     while let Some((peer_id, mut stream)) = incoming.next().await {
         let tx = tx.clone();
         tokio::spawn(async move {
@@ -547,7 +574,7 @@ async fn run_pricing_sink(mut incoming: IncomingStreams, tx: watch::Sender<Optio
     }
 }
 
-async fn run_drain_sink(mut incoming: IncomingStreams, max: usize) {
+pub(crate) async fn run_drain_sink(mut incoming: IncomingStreams, max: usize) {
     while let Some((peer_id, mut stream)) = incoming.next().await {
         tokio::spawn(async move {
             match tokio::time::timeout(Duration::from_secs(30), read_sink_body(&mut stream, max))
@@ -563,7 +590,7 @@ async fn run_drain_sink(mut incoming: IncomingStreams, max: usize) {
 /// Parse bee's `AnnouncePaymentThreshold { bytes PaymentThreshold = 1 }`
 /// protobuf: field 1, wire type 2 (length-delimited), payload is a
 /// big-endian big.Int.
-fn parse_announce_threshold(body: &[u8]) -> Option<U256> {
+pub(crate) fn parse_announce_threshold(body: &[u8]) -> Option<U256> {
     let mut rest = body;
     while !rest.is_empty() {
         let (tag, after_tag) = decode_varint(rest)?;
@@ -593,7 +620,7 @@ fn parse_announce_threshold(body: &[u8]) -> Option<U256> {
     None
 }
 
-fn decode_varint(buf: &[u8]) -> Option<(u64, &[u8])> {
+pub(crate) fn decode_varint(buf: &[u8]) -> Option<(u64, &[u8])> {
     let mut value: u64 = 0;
     for (i, byte) in buf.iter().enumerate().take(10) {
         value |= u64::from(byte & 0x7f) << (7 * u32::try_from(i).ok()?);
@@ -760,12 +787,30 @@ async fn settlement_loop(mut ctx: SettleCtx) -> Result<SettlementSummary> {
     Ok(summary)
 }
 
-struct RateEmitOutcome {
+pub(crate) struct RateEmitOutcome {
     /// PLUR moved by this cheque (units × rate + deduction).
-    plur: u128,
-    plur_u256: U256,
-    rate: u128,
-    cumulative: U256,
+    pub plur: u128,
+    pub plur_u256: U256,
+    pub rate: u128,
+    pub cumulative: U256,
+}
+
+/// Inputs to [`emit_settlement_cheque`] — the money-critical wire path,
+/// shared by the M2 probe and the M4 scheduler.
+pub(crate) struct ChequeEmit<'a> {
+    pub control: &'a mut Control,
+    pub peer_id: PeerId,
+    pub secret: &'a [u8; 32],
+    pub chequebook: [u8; 20],
+    pub beneficiary: [u8; 20],
+    pub chain_id: u64,
+    pub debt_units: u64,
+    pub ledger: &'a ant_p2p::swap::OutboundLedger,
+    /// Cached `balance + totalPaidOut` ceiling on cumulative payout.
+    pub issuable: U256,
+    /// PLUR issued so far (shared across peers for a global spend cap).
+    pub issued_plur: &'a std::sync::atomic::AtomicU64,
+    pub max_issue_plur: u64,
 }
 
 /// Bee's swap wire done in full (ant's `emit_cheque` skips the header
@@ -773,18 +818,16 @@ struct RateEmitOutcome {
 /// exchange rate (PLUR per accounting unit) and a one-time deduction;
 /// the cheque must move `units × rate + deduction` PLUR or the
 /// receiver credits the wrong amount — the first probe run proved bee
-/// then sees unsettled debt and disconnects. The announced rate is
-/// bounded by the run's spend guard; cross-checking it against the
-/// price-oracle contract is a follow-up (scheduler milestone).
-async fn emit_cheque_at_rate(ctx: &mut SettleCtx, debt_units: u64) -> Result<RateEmitOutcome> {
-    let mut stream = ctx
+/// then sees unsettled debt and disconnects. Guards: the cached
+/// invariant (cumulative ≤ issuable) and a global PLUR spend cap
+/// reserved before emit and released on failure.
+pub(crate) async fn emit_settlement_cheque(e: ChequeEmit<'_>) -> Result<RateEmitOutcome> {
+    use std::sync::atomic::Ordering;
+    let mut stream = e
         .control
-        .open_stream(
-            ctx.peer_id,
-            StreamProtocol::new(ant_p2p::swap::PROTOCOL_SWAP),
-        )
+        .open_stream(e.peer_id, StreamProtocol::new(ant_p2p::swap::PROTOCOL_SWAP))
         .await
-        .map_err(|e| anyhow!("open swap stream: {e}"))?;
+        .map_err(|err| anyhow!("open swap stream: {err}"))?;
 
     // Dialer headers (empty), then the headler's response headers.
     stream.write_all(&[0u8]).await?;
@@ -798,63 +841,104 @@ async fn emit_cheque_at_rate(ctx: &mut SettleCtx, debt_units: u64) -> Result<Rat
     // deduction goes to zero once the peer has recorded a cheque from
     // us — seeing it stay non-zero on a later cheque means the earlier
     // one was never accepted (how the quoted-JSON bug was caught).
-    tracing::info!(%rate, %deduction, "swap headers received");
+    tracing::debug!(%rate, %deduction, "swap headers received");
 
     let plur = rate
-        .checked_mul(U256::from(debt_units))
+        .checked_mul(U256::from(e.debt_units))
         .and_then(|v| v.checked_add(deduction))
         .ok_or_else(|| anyhow!("cheque amount overflow"))?;
-    let issued_so_far = U256::from(ctx.issued_plur);
-    if issued_so_far
-        .checked_add(plur)
-        .is_none_or(|total| total > U256::from(ctx.max_issue_plur))
-    {
+    let plur_u128 = u128::try_from(plur).map_err(|_| anyhow!("cheque amount exceeds u128"))?;
+    let plur_u64 = u64::try_from(plur_u128).unwrap_or(u64::MAX);
+
+    // Reserve against the global spend cap before doing anything
+    // irreversible; release on any failure below.
+    let before = e.issued_plur.fetch_add(plur_u64, Ordering::SeqCst);
+    if before.saturating_add(plur_u64) > e.max_issue_plur {
+        e.issued_plur.fetch_sub(plur_u64, Ordering::SeqCst);
         bail!(
             "spend guard: cheque of {plur} PLUR would exceed max_issue_plur={}",
-            ctx.max_issue_plur
-        );
-    }
-    let prev = ctx.ledger.cumulative_for(&ctx.beneficiary);
-    let cumulative = prev
-        .checked_add(plur)
-        .ok_or_else(|| anyhow!("cumulative overflow"))?;
-    if cumulative > ctx.issuable {
-        bail!(
-            "cached invariant: cumulative {cumulative} would exceed issuable {} — chequebook needs a deposit",
-            ctx.issuable
+            e.max_issue_plur
         );
     }
 
-    let signed = ant_p2p::swap::issue_cheque(
-        &ctx.secret,
-        ctx.chequebook,
-        ctx.beneficiary,
-        cumulative,
-        ctx.chain_id,
-    )?;
-    let cheque_json = encode_cheque_json_bee(&signed);
-    // EmitCheque { bytes cheque = 1 }, length-delimited on the wire.
-    let mut msg = Vec::with_capacity(cheque_json.len() + 8);
-    msg.push(0x0a);
-    encode_varint(cheque_json.len() as u64, &mut msg);
-    msg.extend_from_slice(&cheque_json);
-    let mut frame = Vec::with_capacity(msg.len() + 8);
-    encode_varint(msg.len() as u64, &mut frame);
-    frame.extend_from_slice(&msg);
-    stream.write_all(&frame).await?;
-    stream.flush().await?;
-    let _ = stream.close().await;
-
-    if let Err(err) = ctx.ledger.record_issued(&ctx.beneficiary, cumulative) {
-        tracing::warn!("outbound ledger persist failed after emit: {err}");
+    let result = async {
+        let prev = e.ledger.cumulative_for(&e.beneficiary);
+        let cumulative = prev
+            .checked_add(plur)
+            .ok_or_else(|| anyhow!("cumulative overflow"))?;
+        if cumulative > e.issuable {
+            bail!(
+                "cached invariant: cumulative {cumulative} would exceed issuable {} — chequebook needs a deposit",
+                e.issuable
+            );
+        }
+        let signed = ant_p2p::swap::issue_cheque(
+            e.secret,
+            e.chequebook,
+            e.beneficiary,
+            cumulative,
+            e.chain_id,
+        )?;
+        let cheque_json = encode_cheque_json_bee(&signed);
+        // EmitCheque { bytes cheque = 1 }, length-delimited on the wire.
+        let mut msg = Vec::with_capacity(cheque_json.len() + 8);
+        msg.push(0x0a);
+        encode_varint(cheque_json.len() as u64, &mut msg);
+        msg.extend_from_slice(&cheque_json);
+        let mut frame = Vec::with_capacity(msg.len() + 8);
+        encode_varint(msg.len() as u64, &mut frame);
+        frame.extend_from_slice(&msg);
+        stream.write_all(&frame).await?;
+        stream.flush().await?;
+        let _ = stream.close().await;
+        if let Err(err) = e.ledger.record_issued(&e.beneficiary, cumulative) {
+            tracing::warn!("outbound ledger persist failed after emit: {err}");
+        }
+        Ok::<U256, anyhow::Error>(cumulative)
     }
-    let plur_u128 = u128::try_from(plur).map_err(|_| anyhow!("cheque amount exceeds u128"))?;
-    ctx.issued_plur = ctx.issued_plur.saturating_add(plur_u128);
+    .await;
+
+    let cumulative = match result {
+        Ok(c) => c,
+        Err(err) => {
+            e.issued_plur.fetch_sub(plur_u64, Ordering::SeqCst);
+            return Err(err);
+        }
+    };
     Ok(RateEmitOutcome {
         plur: plur_u128,
         plur_u256: plur,
         rate: u128::try_from(rate).unwrap_or(u128::MAX),
         cumulative,
+    })
+}
+
+/// M2 probe wrapper: adapt `SettleCtx` to [`emit_settlement_cheque`]
+/// with a per-run (single-peer) spend counter.
+async fn emit_cheque_at_rate(ctx: &mut SettleCtx, debt_units: u64) -> Result<RateEmitOutcome> {
+    use std::sync::atomic::Ordering;
+    let issued =
+        std::sync::atomic::AtomicU64::new(u64::try_from(ctx.issued_plur).unwrap_or(u64::MAX));
+    let outcome = emit_settlement_cheque(ChequeEmit {
+        control: &mut ctx.control,
+        peer_id: ctx.peer_id,
+        secret: &ctx.secret,
+        chequebook: ctx.chequebook,
+        beneficiary: ctx.beneficiary,
+        chain_id: ctx.chain_id,
+        debt_units,
+        ledger: &ctx.ledger,
+        issuable: ctx.issuable,
+        issued_plur: &issued,
+        max_issue_plur: ctx.max_issue_plur,
+    })
+    .await?;
+    ctx.issued_plur = u128::from(issued.load(Ordering::SeqCst));
+    Ok(RateEmitOutcome {
+        plur: outcome.plur,
+        plur_u256: outcome.plur_u256,
+        rate: outcome.rate,
+        cumulative: outcome.cumulative,
     })
 }
 
@@ -866,7 +950,7 @@ async fn emit_cheque_at_rate(ctx: &mut SettleCtx, debt_units: u64) -> Result<Rat
 /// with "unmarshal cheque" and never credits the payment (upstream
 /// ant bug to report). Addresses are 0x-hex, `Signature` is
 /// standard-padding base64 (geth `[]byte`).
-fn encode_cheque_json_bee(signed: &ant_chain::chequebook::SignedCheque) -> Vec<u8> {
+pub(crate) fn encode_cheque_json_bee(signed: &ant_chain::chequebook::SignedCheque) -> Vec<u8> {
     use base64::Engine as _;
     format!(
         "{{\"Chequebook\":\"0x{}\",\"Beneficiary\":\"0x{}\",\"CumulativePayout\":{},\"Signature\":\"{}\"}}",
@@ -881,7 +965,7 @@ fn encode_cheque_json_bee(signed: &ant_chain::chequebook::SignedCheque) -> Vec<u
 /// Parse bee's headers protobuf: `Headers { repeated Header { string
 /// key = 1; bytes value = 2 } }`, returning the `exchange` rate and
 /// `deduction` (zero when absent, matching bee's payer side).
-fn parse_settlement_headers(body: &[u8]) -> Option<(U256, U256)> {
+pub(crate) fn parse_settlement_headers(body: &[u8]) -> Option<(U256, U256)> {
     let mut exchange: Option<U256> = None;
     let mut deduction = U256::zero();
     let mut rest = body;
@@ -927,7 +1011,7 @@ fn parse_settlement_headers(body: &[u8]) -> Option<(U256, U256)> {
     exchange.map(|rate| (rate, deduction))
 }
 
-fn encode_varint(mut value: u64, out: &mut Vec<u8>) {
+pub(crate) fn encode_varint(mut value: u64, out: &mut Vec<u8>) {
     loop {
         let byte = u8::try_from(value & 0x7f).expect("masked to 7 bits");
         value >>= 7;
@@ -939,7 +1023,7 @@ fn encode_varint(mut value: u64, out: &mut Vec<u8>) {
     }
 }
 
-async fn read_delimited(
+pub(crate) async fn read_delimited(
     stream: &mut (impl AsyncReadExt + Unpin),
     max: usize,
 ) -> std::io::Result<Vec<u8>> {
