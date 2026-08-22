@@ -1,5 +1,33 @@
 # directswarm — STATUS
 
+## 2026-08-22 — design revision 2.3: latency-aware source selection
+
+**Built:** nothing — design stage.
+
+**Done:** folded in latency-aware source selection (DESIGN.md new
+section "Latency-aware source selection"; crawler and scheduler
+components updated; PLAN Phase 0 now records dial RTTs and Phase 1's
+scheduler is latency-aware; Q6 extended with the probe budget and the
+prediction-method choice). Key points:
+
+- With pipeline depth capped by the accounting threshold, per-storer
+  rate ∝ 1/RTT — choosing which 2–3 of a neighborhood's members to
+  dial is the main per-connection throughput lever.
+- Discipline: latency ranks the healthy but never disqualifies; RTT
+  is the prior, observed service rate the posterior (AIMD keeps the
+  final say); ε-greedy floor against hot-spotting and earnings skew.
+- Measurement in etiquette order: passive handshake timing → stock
+  pingpong probes within the dial budget → GeoIP/ASN or Vivaldi-style
+  coordinate prediction for the unprobed.
+- Hedged duplicate requests for tail chunks, with the honesty caveat
+  that a hedged chunk arriving second is still settled — surplus
+  bounded and ledgered.
+
+**Measured:** nothing. **Spend:** 0 xBZZ. **Deviations:** none.
+
+**Open items:** (H) agenda unchanged; rev 2.3 uncommitted pending
+review.
+
 ## 2026-08-21 — design revision 2.2: discussion points folded into docs
 
 **Built:** nothing — still design stage.

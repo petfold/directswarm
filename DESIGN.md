@@ -1,4 +1,4 @@
-# directswarm — design (draft, rev 2.2)
+# directswarm — design (draft, rev 2.3)
 
 Rev 2 (2026-08-21) widened scope from "bulk fetcher dialing storer
 neighborhoods" to a two-plane architecture with peer-assisted
@@ -8,7 +8,8 @@ influence the design at this stage (rationale at the end) — and folds
 in protocol facts verified against the bee source. Rev 2.2 (same day)
 records the deployment form factor, the systemic-adoption analysis
 ("would it overtake the network?"), and a reassessment of the
-anonymity trade.
+anonymity trade. Rev 2.3 (2026-08-22) adds latency-aware source
+selection.
 
 ## The problem, restated
 
@@ -160,6 +161,57 @@ d. **Upstream: provider/session records in Swarm's kademlia proper**
 MVP posture: (a) + (b) to bootstrap, (c) within a session, (d) proposed
 upstream at Phase 2 with measurements. No trackers, no well-known
 servers — bootstrap must stay decentralized (Tradeoffs, below).
+
+## Latency-aware source selection (rev 2.3)
+
+Because per-connection pipeline depth is capped by the accounting
+threshold (~50 chunks outstanding; Settlement design), per-storer rate
+≈ depth × 4 KiB ÷ RTT — **throughput is inversely proportional to
+RTT**. The scheduler dials only 2–3 of a neighborhood's ~4–10 members,
+so *which* members is the main per-connection lever: a 30 ms member
+over a 150 ms one is a 5× difference on the same accounting budget.
+The same logic applies even more freely to S2/S3 peers, which are not
+neighborhood-constrained at all.
+
+Selection discipline:
+
+- **Latency ranks the healthy; it never disqualifies.** All
+  neighborhood members remain valid sources — a high-RTT member may be
+  the only reachable one. Removing the latency signal degrades speed
+  only, never availability.
+- **RTT is the prior; observed service rate is the posterior.** A
+  nearby storer on a struggling disk loses to a farther one on NVMe;
+  the existing AIMD-on-observed-rate keeps the final say.
+- **Bounded preference (ε-greedy)**: a minimum probability mass on
+  non-preferred members keeps estimates fresh and avoids hot-spotting
+  the best-connected storer in every neighborhood — which is also
+  fairer to SWAP earnings across members.
+
+Measurement sources, in etiquette order:
+
+1. **Passive** — every dial already yields a handshake RTT; record it
+   in the topology cache, freshness-stamped. Zero extra traffic; every
+   fetch enriches the map.
+2. **Active** — bee's stock `pingpong` protocol; rate-limited probes
+   for never-dialed candidates, drawn from the same dial budget as the
+   crawl (OPEN-QUESTIONS 6).
+3. **Predicted** — for the unprobed majority of ~10k nodes: coarse
+   priors from underlay IP (GeoIP/ASN buckets), or a
+   network-coordinate embedding (Vivaldi-style) fitted over the few
+   hundred measured RTTs, so unvisited nodes get an estimate without
+   being probed.
+
+**Hedged tail**: for the last straggling chunks, issue the same request to two
+neighborhood members and take the first delivery. Settlement caveat
+the upstream version doesn't face: under invariant 3, a hedged chunk
+that arrives second was still served and is still paid for — hedging
+costs real xBZZ, so the surplus is bounded (a few % of chunks, tail
+only) and reported in the spend ledger, never hidden.
+
+A privacy note: latency bias leaks coarse requester geography — moot
+here, since the fast plane is already the opt-in mode where sources
+see the requester ("Anonymity, reassessed"); the marginal leakage is
+nil.
 
 ## What forwarding kademlia buys — and this design's answer
 
@@ -338,14 +390,19 @@ remaining role is reference implementation and measurement harness.
 ## Components
 
 1. **crawler/** — bounded overlay walk building the topology cache:
-   bin-organized, freshness-stamped, NAT-reachability flagged;
+   bin-organized, freshness-stamped, NAT-reachability flagged; carries
+   per-node RTT estimates (measured on dial, probed via stock
+   pingpong, or predicted — see "Latency-aware source selection");
    rate-limited and polite; refreshed lazily on dial failures;
    prefix-targeted lookup mode for scale.
 2. **rendezvous/** — session discovery: metadata hints, presence feed,
    per-reference gossip topic; presence records signed and short-lived.
-3. **scheduler/** — chunk→queue assignment across source classes,
-   price- and rate-aware; AIMD pipeline depth per peer; retry across
-   sources; forwarding fallback; resume from verified state.
+3. **scheduler/** — chunk→queue assignment across source classes;
+   price-, rate-, and latency-aware (RTT prior, observed service rate
+   posterior, ε-greedy floor); AIMD pipeline depth per peer; hedged
+   duplicate requests for tail chunks (bounded, settled, ledgered);
+   retry across sources; forwarding fallback; resume from verified
+   state.
 4. **transport/** — libp2p dial + Bee handshake + retrieval +
    settlement. Substrate decision (OPEN-QUESTIONS 4): extend **ant**
    (Rust; stack exists, Solar Punk codebase; needs multi-peer

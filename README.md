@@ -131,12 +131,13 @@ reference implementation and measurement harness.
 
 ## Status
 
-Handoff / design stage, revision 2.2 (2026-08-21): the two-plane
+Handoff / design stage, revision 2.3 (2026-08-22): the two-plane
 design (bulk fetcher first, peer-assist later); live streaming was
 considered and deliberately demoted to a deferred note so it cannot
 shape the design (DESIGN.md, "Deferred: live streams"); rev 2.2 adds
 form factor, the systemic-adoption analysis, and the anonymity
-reassessment. Nothing
+reassessment; rev 2.3 (2026-08-22) adds latency-aware source
+selection. Nothing
 implemented. Read DESIGN.md, PLAN.md, OPEN-QUESTIONS.md — Phase 0 (the
 storer service-rate spike) still gates everything, and several
 fast-plane decisions are explicitly parked for discussion

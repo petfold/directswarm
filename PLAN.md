@@ -38,12 +38,15 @@ never a default.
 
 **Deliverables:** spike code (throwaway allowed), REPORT-phase0.md with
 raw CSVs, substrate recommendation (ant vs bee-as-library vs custom)
-with measured per-chunk CPU cost per substrate candidate.
+with measured per-chunk CPU cost per substrate candidate. Record
+dial/handshake RTT per contacted node throughout — free data that
+seeds the latency model (DESIGN.md, "Latency-aware source selection").
 
 ## Phase 1 — Fetcher MVP (S1 only)
 
-Topology cache + source-class-aware scheduler (storer sources only) +
-verification + forwarding fallback + resume.
+Topology cache (with RTT estimates) + source-class-aware,
+latency-aware scheduler (storer sources only) + verification +
+forwarding fallback + resume.
 CLI: `directswarm fetch <ref> [-o file]` against mainnet.
 
 **Acceptance:** 1 GiB cold fetch, byte-verified, ≥25 MB/s median over

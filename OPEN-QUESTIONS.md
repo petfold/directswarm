@@ -41,9 +41,12 @@ questions 14–15 (meta renumbered 16–19).
    non-storer pricing) disclosed in that write-up, not drip-fed.
    Confirm this posture.
 6. **(C) Crawl etiquette**: rate limits, cache TTLs, dial budgets that
-   keep a fetch from looking like an attack. Also: can the topology
-   cache be shared/published (a signed snapshot on Swarm itself?)
-   without becoming a centralization point?
+   keep a fetch from looking like an attack. RTT probing (stock
+   pingpong) draws from the same dial budget; also choose the
+   prediction method for unprobed nodes (GeoIP/ASN priors vs a
+   Vivaldi-style coordinate fit). Also: can the topology cache be
+   shared/published (a signed snapshot on Swarm itself?) without
+   becoming a centralization point?
 7. **(H) Settlement identity**: directswarm needs its own funded
    chequebook (invariant 3). One per client install? Shared with a
    local Bee node's wallet? Custody + funding UX — and with S2 serving,
