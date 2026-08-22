@@ -49,6 +49,53 @@ blessings used — 80 under the Phase-0 grant (2×40), 235 under the new
 240-dial grant (user, 2026-08-22); ≤2 dials/s, one attempt per peer,
 no retries, polite disconnects throughout; spend 0.
 
+**Phase 1 M4 (same day): multi-connection settled scheduler built +
+measured — CORRECT, but does NOT scale as built.** `directswarm
+fetch-direct` stands up one libp2p swarm with N settled storer
+connections (shared Accounting, shared OutboundLedger, shared
+cached-invariant, atomic global cheque spend cap), routes each chunk
+to the shortest-queue covering connection, settles per-connection
+(pseudosettle cadence + cheque at threshold/4 + final sweep), falls
+back to local bee for uncovered chunks, lands chunks in an on-disk
+`ChunkStore`, and reassembles+byte-verifies via the M1 joiner over a
+`StoreFetcher`. On-Ethernet measurement (route via enp7s0):
+
+| conns | direct chunks | wall | note |
+|---|---|---|---|
+| 3 | 182 | (capped) | diag |
+| 4 | 389 (+210 fallback) | 79 s **completed** | 105 cheques, **0 residual debt**, 0.0006 xBZZ |
+| 8 | 1100 | 340 s cap | did not finish |
+| 16 | 1622 | 400 s cap | did not finish |
+
+**Correctness proven** (4-conn: fully settled, zero residual, cheques
+accepted multi-peer). **Scaling FAILED**: more connections did not
+raise throughput (~4–8 chunks/s aggregate regardless of N) — opposite
+of Phase-0's arithmetic, so the limiter is this implementation, not
+the network. Root causes, in order:
+1. **Single swarm poller** — all N connections' retrieval + settlement
+   streams funnel through one `libp2p::Swarm` driven by one task,
+   serializing stream negotiation. This is the throughput ceiling and
+   the reason aggregate is flat in N. Fix (M4-cont / M5): independent
+   transport per connection (own swarm/poller per storer, as the M2
+   probe had) or shard connections across several swarms/pollers.
+2. **Sequential dial, 20 s timeout each** — storers churned out since
+   the M3 crawl each burn the full timeout, so a high-N run spends most
+   of its wall clock dialing, not fetching. Fix: parallel dial + drop
+   the cache's stale/gossip-only entries first (prefer dialed_ok=1).
+3. **Settlement pacing** — reserve cap (½ threshold ≈ 4 chunks in
+   flight) × bee's ~2.5 s cheque-credit lag paces each connection to a
+   few chunks/s. Improvable by raising in-flight headroom carefully or
+   pipelining cheques ahead of credit.
+Not a phase-gate failure — the fetcher is correct and settled; the
+throughput target (≥25 MB/s) is a performance-engineering problem with
+a clear cause. **Recommended next: rework the transport to one poller
+per connection (restores the M2 per-connection rate, ~0.2 MB/s
+patched / lower unpatched, ×N) + parallel dial, then re-run the ramp.**
+Spend this milestone: ~0.0006 xBZZ (one completed 4-conn tier; the
+capped runs settled their own partial debt to zero, ledgered).
+`m4-scaling.csv` holds the one completed row. AIMD depth, hedged tails,
+and per-peer threshold parse remain deferred to M5.
+
 **Phase 1 M3 done (same day): topology cache + polite crawler,
 measured.** `directswarm crawl` — bounded snowball: seed dials (from
 Phase-0 reach.csv), BZZ handshake with RTT recorded, ~4 s gossip

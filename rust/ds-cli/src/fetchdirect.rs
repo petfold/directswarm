@@ -38,6 +38,11 @@ pub struct FetchDirectArgs {
     /// On-disk chunk store base path.
     #[arg(long, default_value = "../.phase1/m4-store")]
     pub store_base: PathBuf,
+    /// Measurement mode: drop chunks no connection covers instead of
+    /// using the bee fallback, so reported throughput is the direct
+    /// plane's alone.
+    #[arg(long, default_value_t = false)]
+    pub direct_only: bool,
     /// Reassemble + byte-verify after fetch (needs --reference and a
     /// complete chunk set in the store).
     #[arg(long, default_value_t = false)]
@@ -191,6 +196,7 @@ pub async fn run(args: FetchDirectArgs) -> i32 {
         max_depth: args.depth,
         depth: args.nbhd_depth,
         max_issue_plur: args.max_issue_plur,
+        direct_only: args.direct_only,
     };
 
     let report = match ds_net::schedule::fetch_scheduled(&identity, &cache, chunks, &opts).await {
@@ -201,27 +207,33 @@ pub async fn run(args: FetchDirectArgs) -> i32 {
         }
     };
 
-    let mbps = report.aggregate_mbps();
+    let direct_mbps = report.direct_mbps();
     let per_conn = if report.connections_opened > 0 {
-        mbps / report.connections_opened as f64
+        direct_mbps / report.connections_opened as f64
     } else {
         0.0
     };
     println!("== M4 fetch-direct report ==");
     println!("connections:     {} opened", report.connections_opened);
     println!(
-        "chunks:          {} direct + {} fallback + {} failed / {} total",
+        "chunks:          {} direct + {} fallback + {} dropped-uncovered + {} failed / {} total",
         report.chunks_from_direct,
         report.chunks_from_fallback,
+        report.chunks_dropped_uncovered,
         report.chunks_failed,
         report.chunks_total
     );
     println!(
-        "throughput:      {} bytes in {:.1}s = {:.3} MB/s aggregate ({:.4} MB/s per connection)",
-        report.bytes,
+        "DIRECT plane:    {} bytes in {:.1}s = {:.3} MB/s aggregate ({:.4} MB/s per connection)",
+        report.direct_bytes,
         report.wall.as_secs_f64(),
-        mbps,
+        direct_mbps,
         per_conn
+    );
+    println!(
+        "fallback plane:  {} bytes = {:.3} MB/s (bee forwarding)",
+        report.fallback_bytes,
+        report.total_mbps() - direct_mbps
     );
     println!(
         "settlement:      {} cheques = {} PLUR; {} refresh units; residual {} units",
@@ -238,7 +250,7 @@ pub async fn run(args: FetchDirectArgs) -> i32 {
         }
     }
 
-    if let Err(e) = append_csv(&args, &report, mbps, per_conn) {
+    if let Err(e) = append_csv(&args, &report, direct_mbps, per_conn) {
         eprintln!("warning: csv append failed: {e}");
     }
 
@@ -311,7 +323,7 @@ fn append_csv(
         .open(&args.csv_out)
         .map_err(|e| e.to_string())?;
     if new {
-        writeln!(f, "connections,depth,chunks_direct,chunks_fallback,chunks_failed,bytes,wall_secs,mb_per_s,mb_per_s_per_conn,cheques,cheque_plur,refresh_units,residual_units").map_err(|e| e.to_string())?;
+        writeln!(f, "connections,depth,chunks_direct,chunks_fallback,chunks_dropped,direct_bytes,wall_secs,direct_mb_per_s,mb_per_s_per_conn,cheques,cheque_plur,refresh_units,residual_units").map_err(|e| e.to_string())?;
     }
     writeln!(
         f,
@@ -320,8 +332,8 @@ fn append_csv(
         args.depth,
         report.chunks_from_direct,
         report.chunks_from_fallback,
-        report.chunks_failed,
-        report.bytes,
+        report.chunks_dropped_uncovered,
+        report.direct_bytes,
         report.wall.as_secs_f64(),
         report.cheques_issued,
         report.cheque_plur,

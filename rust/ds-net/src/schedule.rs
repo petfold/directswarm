@@ -62,6 +62,10 @@ pub struct ScheduleOptions {
     pub depth: u8,
     /// Global cheque spend cap in PLUR (safety budget).
     pub max_issue_plur: u64,
+    /// Measurement mode: drop chunks no connection covers instead of
+    /// sending them to the bee fallback, so the reported throughput is
+    /// the direct plane's alone.
+    pub direct_only: bool,
 }
 
 #[derive(Debug, Default)]
@@ -70,8 +74,12 @@ pub struct ScheduleReport {
     pub chunks_total: usize,
     pub chunks_from_direct: u64,
     pub chunks_from_fallback: u64,
+    pub chunks_dropped_uncovered: u64,
     pub chunks_failed: u64,
-    pub bytes: u64,
+    /// Bytes delivered by the direct (settled storer) plane.
+    pub direct_bytes: u64,
+    /// Bytes delivered by the bee forwarding fallback.
+    pub fallback_bytes: u64,
     pub wall: Duration,
     pub cheques_issued: u64,
     pub cheque_plur: u128,
@@ -81,12 +89,25 @@ pub struct ScheduleReport {
 }
 
 impl ScheduleReport {
+    /// Direct-plane aggregate throughput — the M4 scaling metric.
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
-    pub fn aggregate_mbps(&self) -> f64 {
+    pub fn direct_mbps(&self) -> f64 {
         let s = self.wall.as_secs_f64();
         if s > 0.0 {
-            self.bytes as f64 / 1e6 / s
+            self.direct_bytes as f64 / 1e6 / s
+        } else {
+            0.0
+        }
+    }
+
+    /// Total (direct + fallback) throughput.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn total_mbps(&self) -> f64 {
+        let s = self.wall.as_secs_f64();
+        if s > 0.0 {
+            (self.direct_bytes + self.fallback_bytes) as f64 / 1e6 / s
         } else {
             0.0
         }
@@ -280,7 +301,11 @@ pub async fn fetch_scheduled(
             match best {
                 Some(i) => queues[i].push(*addr),
                 None => {
-                    let _ = fb_tx.send(*addr);
+                    if opts.direct_only {
+                        report.chunks_dropped_uncovered += 1;
+                    } else {
+                        let _ = fb_tx.send(*addr);
+                    }
                 }
             }
         }
@@ -290,7 +315,7 @@ pub async fn fetch_scheduled(
     }
 
     // Per-connection settlement drivers + fetch workers.
-    let bytes = Arc::new(AtomicU64::new(0));
+    let direct_bytes = Arc::new(AtomicU64::new(0));
     let direct_ok = Arc::new(AtomicU64::new(0));
     let cheques = Arc::new(AtomicU64::new(0));
     let cheque_plur = Arc::new(AtomicU64::new(0));
@@ -320,7 +345,7 @@ pub async fn fetch_scheduled(
             conn: c.clone(),
             acct: acct.clone(),
             store: store.clone(),
-            bytes: bytes.clone(),
+            bytes: direct_bytes.clone(),
             direct_ok: direct_ok.clone(),
             fallback: fb_tx.clone(),
             depth: opts.start_depth,
@@ -333,7 +358,8 @@ pub async fn fetch_scheduled(
     // Fallback worker (bee forwarding) drains uncovered + failed chunks.
     let fallback = BeeApiFetcher::new(&opts.bee_url)?;
     let fb_store = store.clone();
-    let fb_bytes = bytes.clone();
+    let fb_bytes = Arc::new(AtomicU64::new(0));
+    let fb_bytes2 = fb_bytes.clone();
     let fb_count = Arc::new(AtomicU64::new(0));
     let fb_count2 = fb_count.clone();
     let fb_handle = tokio::spawn(async move {
@@ -347,7 +373,7 @@ pub async fn fetch_scheduled(
             match fallback.fetch(addr).await {
                 Ok(wire) => {
                     let _ = fb_store.put(addr, &wire);
-                    fb_bytes.fetch_add(wire.len() as u64, Ordering::Relaxed);
+                    fb_bytes2.fetch_add(wire.len() as u64, Ordering::Relaxed);
                     fb_count2.fetch_add(1, Ordering::Relaxed);
                 }
                 Err(err) => fails.push(format!("fallback {}: {err}", hex::encode(addr))),
@@ -374,18 +400,18 @@ pub async fn fetch_scheduled(
     store.flush()?;
 
     report.wall = started.elapsed();
-    report.bytes = bytes.load(Ordering::Relaxed);
+    report.direct_bytes = direct_bytes.load(Ordering::Relaxed);
+    report.fallback_bytes = fb_bytes.load(Ordering::Relaxed);
     report.chunks_from_direct = direct_ok.load(Ordering::Relaxed);
     report.chunks_from_fallback = fb_count.load(Ordering::Relaxed);
     report.cheques_issued = cheques.load(Ordering::Relaxed);
     report.cheque_plur = u128::from(cheque_plur.load(Ordering::Relaxed));
     report.refresh_units = refresh_units.load(Ordering::Relaxed);
     report.residual_debt_units = residual;
-    let stored = store.len() as u64;
     report.chunks_failed = (needed.len() as u64)
-        .saturating_sub(report.chunks_from_direct + report.chunks_from_fallback);
+        .saturating_sub(report.chunks_from_direct + report.chunks_from_fallback)
+        .saturating_sub(report.chunks_dropped_uncovered);
     report.errors.extend(fb_fails);
-    let _ = stored;
     Ok(report)
 }
 
