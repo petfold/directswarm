@@ -29,10 +29,6 @@ use tokio::sync::{mpsc, oneshot, watch, Semaphore};
 
 use crate::identity::Identity;
 
-/// Bee's light-peer early-payment point (threshold / 2): issue a cheque
-/// once debt crosses this. Mirrors `ant_p2p::LIGHT_PAYMENT_THRESHOLD`'s
-/// `DEFAULT_CHEQUE_TRIGGER` on the upload side.
-const CHEQUE_TRIGGER: u64 = 675_000;
 /// Minimum spacing between pseudosettle refresh attempts (bee rejects
 /// faster refreshes; ant's driver uses 1100 ms).
 const REFRESH_MIN_INTERVAL: Duration = Duration::from_millis(1100);
@@ -41,6 +37,11 @@ const SETTLE_TICK: Duration = Duration::from_millis(250);
 /// Wait after the BZZ handshake so bee's swap/pricing registration and
 /// threshold announcement land before we open retrieval streams.
 const POST_HANDSHAKE_SETTLE: Duration = Duration::from_secs(2);
+/// How long an emitted cheque stays "in flight" before we credit our
+/// own mirror: bee validates it with ~3 on-chain RPC calls (issuer,
+/// balance, paidOut against a public endpoint) before crediting its
+/// ledger, and until then bee's view of our debt is higher than ours.
+const CHEQUE_CREDIT_DELAY: Duration = Duration::from_millis(2500);
 const DIAL_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone)]
@@ -70,10 +71,18 @@ pub struct ProbeOptions {
 #[derive(Debug, Default, Clone)]
 pub struct SettlementSummary {
     pub cheques_issued: u64,
-    pub cheque_plur: u64,
+    /// Accounting units settled by cheques.
+    pub cheque_units: u64,
+    /// Real PLUR moved by cheques (units × announced rate + deduction).
+    pub cheque_plur: u128,
+    /// Peer-announced exchange rate (PLUR per accounting unit) at the
+    /// first cheque.
+    pub exchange_rate: Option<u128>,
     pub refreshes_accepted: u64,
-    pub refresh_plur: u64,
-    pub residual_debt_plur: u64,
+    /// Accounting units settled by pseudosettle (time-based free tier).
+    pub refresh_units: u64,
+    /// Unsettled accounting units at disconnect (should be 0).
+    pub residual_debt_units: u64,
     /// Peer-announced payment threshold (parsed from the pricing
     /// stream), if it arrived.
     pub announced_threshold: Option<U256>,
@@ -159,24 +168,38 @@ pub async fn probe_storer(
     let dialed_addr = wait_connected(&mut swarm, peer_id).await?;
 
     // Hand the swarm to a drive task; keep a handle to disconnect
-    // politely at the end.
+    // politely at the end, and a liveness flag so fetch/settlement
+    // loops abort instead of spinning when the peer hangs up on us.
+    let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let (bye_tx, mut bye_rx) = oneshot::channel::<oneshot::Sender<()>>();
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                evt = swarm.next() => {
-                    if evt.is_none() { break; }
-                }
-                cmd = &mut bye_rx => {
-                    let _ = swarm.disconnect_peer_id(peer_id);
-                    // Give the FIN a moment to flush.
-                    tokio::time::sleep(Duration::from_millis(300)).await;
-                    if let Ok(done) = cmd { let _ = done.send(()); }
-                    break;
+    {
+        let alive = alive.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    evt = swarm.next() => {
+                        match evt {
+                            None => break,
+                            Some(SwarmEvent::ConnectionClosed { peer_id: closed, .. })
+                                if closed == peer_id =>
+                            {
+                                alive.store(false, Ordering::Relaxed);
+                            }
+                            Some(_) => {}
+                        }
+                    }
+                    cmd = &mut bye_rx => {
+                        let _ = swarm.disconnect_peer_id(peer_id);
+                        // Give the FIN a moment to flush.
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        alive.store(false, Ordering::Relaxed);
+                        if let Ok(done) = cmd { let _ = done.send(()); }
+                        break;
+                    }
                 }
             }
-        }
-    });
+        });
+    }
 
     // --- BZZ handshake, honest light role, V15 then V14 ---
     let hs_started = Instant::now();
@@ -197,6 +220,22 @@ pub async fn probe_storer(
     }
     tokio::time::sleep(POST_HANDSHAKE_SETTLE).await;
 
+    // Reserve cap: HALF the announced payment threshold — bee's own
+    // early-payment posture. Bee blocks a peer whose ledger reaches
+    // disconnectLimit = 1.25 × threshold, and its credit for a cheque
+    // lands only after several on-chain validation calls of unknown
+    // latency. With outstanding debt capped at T/2, even a full refill
+    // burst on top of a still-unvalidated cheque peaks bee's ledger at
+    // ~T < 1.25T (runs 3–5 died at caps of 1.25T and T), and if a
+    // cheque is ever rejected outright, pseudosettle refreshes alone
+    // (450k units/s) outpace our refill rate so debt still shrinks.
+    let announced = threshold_rx
+        .borrow()
+        .as_ref()
+        .map_or(1_350_000, |t| u64::try_from(*t).unwrap_or(1_350_000));
+    let reserve_cap = announced / 2;
+    let cheque_trigger = reserve_cap / 2;
+
     // --- accounting + settlement task ---
     let (hot_tx, hot_rx) = mpsc::channel::<HotHint>(16);
     let acct = Arc::new(Accounting::new().with_hot_hint(hot_tx));
@@ -212,11 +251,16 @@ pub async fn probe_storer(
         ledger,
         issuable,
         max_issue_plur: opts.max_issue_plur,
+        issued_plur: 0,
+        pending_cheque_units: Arc::new(AtomicU64::new(0)),
+        cheque_trigger,
+        alive: alive.clone(),
         hot_rx,
         done: fetch_done.clone(),
     }));
 
     // --- pipelined retrieval ---
+    let reserve_lock = Arc::new(tokio::sync::Mutex::new(()));
     let started = Instant::now();
     let sem = Arc::new(Semaphore::new(opts.pipeline_depth));
     let bytes = Arc::new(AtomicU64::new(0));
@@ -226,15 +270,31 @@ pub async fn probe_storer(
         let mut task_control = control.clone();
         let task_acct = acct.clone();
         let task_bytes = bytes.clone();
+        let task_lock = reserve_lock.clone();
+        let task_alive = alive.clone();
         let storer_overlay = target.overlay;
         tasks.spawn(async move {
             let _permit = permit;
             let price = Accounting::peer_price(&storer_overlay, &addr);
-            // Reserve against the mirrored threshold; on overdraft wait
-            // for settlement to knock debt down (bee's 600 ms skip).
+            // Reserve under the cap (checked and reserved under one
+            // lock so concurrent tasks can't stack past it); on
+            // overdraft wait for settlement to knock debt down (bee's
+            // 600 ms skip). Abort if the connection died.
             let guard = loop {
-                if let Some(guard) = task_acct.try_reserve(peer_id, price) {
-                    break guard;
+                if !task_alive.load(Ordering::Relaxed) {
+                    return Err(format!(
+                        "chunk {}: connection closed before reserve",
+                        hex::encode(addr)
+                    ));
+                }
+                {
+                    let _serialized = task_lock.lock().await;
+                    let (balance, reserved) = task_acct.debug_snapshot(&peer_id).unwrap_or((0, 0));
+                    if balance.saturating_add(reserved).saturating_add(price) <= reserve_cap {
+                        if let Some(guard) = task_acct.try_reserve(peer_id, price) {
+                            break guard;
+                        }
+                    }
                 }
                 tokio::time::sleep(Duration::from_millis(150)).await;
             };
@@ -560,6 +620,14 @@ struct SettleCtx {
     /// exact for M2; the multi-peer scheduler sums the ledger.
     issuable: U256,
     max_issue_plur: u64,
+    /// PLUR issued as cheques so far this run (spend-guard state).
+    issued_plur: u128,
+    /// Units covered by emitted-but-not-yet-credited cheques.
+    pending_cheque_units: Arc<AtomicU64>,
+    /// Debt (units) at which to emit a cheque = `reserve_cap` / 2.
+    cheque_trigger: u64,
+    /// Connection liveness; settlement stops when the peer hangs up.
+    alive: Arc<std::sync::atomic::AtomicBool>,
     hot_rx: mpsc::Receiver<HotHint>,
     done: Arc<tokio::sync::Notify>,
 }
@@ -567,6 +635,7 @@ struct SettleCtx {
 /// Keep the connection settled: pseudosettle refresh on cadence, SWAP
 /// cheque whenever residual debt crosses the trigger, and a final
 /// sweep that cheques the remainder down to zero before hanging up.
+#[allow(clippy::too_many_lines)]
 async fn settlement_loop(mut ctx: SettleCtx) -> Result<SettlementSummary> {
     let mut summary = SettlementSummary::default();
     let mut last_refresh: Option<Instant> = None;
@@ -581,6 +650,17 @@ async fn settlement_loop(mut ctx: SettleCtx) -> Result<SettlementSummary> {
                 () = ctx.done.notified() => { finishing = true; }
             }
         }
+        // If the peer disconnected, further settlement is impossible;
+        // record whatever debt is outstanding and stop.
+        if !ctx.alive.load(Ordering::Relaxed) {
+            let balance = ctx
+                .acct
+                .debug_snapshot(&ctx.peer_id)
+                .map_or(0, |(balance, _reserved)| balance);
+            summary.residual_debt_units =
+                balance.saturating_sub(ctx.pending_cheque_units.load(Ordering::Relaxed));
+            break;
+        }
         let debt = ctx
             .acct
             .debug_snapshot(&ctx.peer_id)
@@ -594,7 +674,7 @@ async fn settlement_loop(mut ctx: SettleCtx) -> Result<SettlementSummary> {
                 Ok(ok) if ok.accepted > 0 => {
                     ctx.acct.credit(ctx.peer_id, ok.accepted);
                     summary.refreshes_accepted += 1;
-                    summary.refresh_plur += ok.accepted;
+                    summary.refresh_units += ok.accepted;
                 }
                 Ok(_) => {}
                 Err(err) => tracing::debug!("refresh: {err}"),
@@ -602,54 +682,61 @@ async fn settlement_loop(mut ctx: SettleCtx) -> Result<SettlementSummary> {
             last_refresh = Some(Instant::now());
         }
 
+        // Effective debt excludes cheques already emitted but not yet
+        // credited to the mirror: bee validates a cheque with ~3
+        // on-chain RPC calls before applying the credit, so for that
+        // window bee's ledger is HIGHER than ours. Crediting instantly
+        // let the pipeline consume the freed headroom and push bee past
+        // its disconnect limit — measured in probe run 2 (disconnect
+        // ~200 ms after emit). We therefore credit after
+        // CHEQUE_CREDIT_DELAY and never double-count in-flight cheques.
         let debt = ctx
             .acct
             .debug_snapshot(&ctx.peer_id)
             .map_or(0, |(balance, _reserved)| balance);
+        let pending = ctx.pending_cheque_units.load(Ordering::Relaxed);
+        let effective_debt = debt.saturating_sub(pending);
         let should_cheque = if finishing {
-            debt > 0
+            effective_debt > 0
         } else {
-            debt >= CHEQUE_TRIGGER
+            effective_debt >= ctx.cheque_trigger
         };
         if should_cheque {
-            if summary.cheque_plur.saturating_add(debt) > ctx.max_issue_plur {
-                bail!(
-                    "spend guard: cheque total would exceed max_issue_plur={} — aborting settlement",
-                    ctx.max_issue_plur
-                );
-            }
-            let prev = ctx.ledger.cumulative_for(&ctx.beneficiary);
-            let next = prev
-                .checked_add(U256::from(debt))
-                .ok_or_else(|| anyhow!("cumulative overflow"))?;
-            if next > ctx.issuable {
-                bail!(
-                    "cached invariant: cumulative {next} would exceed issuable {} — chequebook needs a deposit",
-                    ctx.issuable
-                );
-            }
-            match ant_p2p::swap::issue_and_emit(
-                &mut ctx.control,
-                ctx.peer_id,
-                &ctx.secret,
-                ctx.chequebook,
-                ctx.beneficiary,
-                U256::from(debt),
-                ctx.chain_id,
-                &ctx.ledger,
-            )
-            .await
-            {
-                Ok(cumulative) => {
-                    ctx.acct.credit(ctx.peer_id, debt);
+            let debt = effective_debt;
+            match emit_cheque_at_rate(&mut ctx, debt).await {
+                Ok(outcome) => {
+                    if finishing {
+                        // Nothing reserves any more; apply directly so
+                        // the residual check below sees the truth.
+                        ctx.acct.credit(ctx.peer_id, debt);
+                    } else {
+                        ctx.pending_cheque_units.fetch_add(debt, Ordering::Relaxed);
+                        let acct = ctx.acct.clone();
+                        let pending = ctx.pending_cheque_units.clone();
+                        let peer = ctx.peer_id;
+                        tokio::spawn(async move {
+                            tokio::time::sleep(CHEQUE_CREDIT_DELAY).await;
+                            acct.credit(peer, debt);
+                            pending.fetch_sub(debt, Ordering::Relaxed);
+                        });
+                    }
                     summary.cheques_issued += 1;
-                    summary.cheque_plur += debt;
-                    tracing::info!(amount = debt, %cumulative, "cheque emitted");
+                    summary.cheque_units += debt;
+                    summary.cheque_plur += outcome.plur;
+                    if summary.exchange_rate.is_none() {
+                        summary.exchange_rate = Some(outcome.rate);
+                    }
+                    tracing::info!(
+                        units = debt,
+                        plur = %outcome.plur_u256,
+                        cumulative = %outcome.cumulative,
+                        "cheque emitted at announced rate"
+                    );
                 }
                 Err(err) => {
                     if finishing {
-                        summary.residual_debt_plur = debt;
-                        tracing::warn!("final cheque failed, residual debt {debt}: {err}");
+                        summary.residual_debt_units = debt;
+                        tracing::warn!("final cheque failed, residual debt {debt} units: {err}");
                         break;
                     }
                     tracing::warn!("cheque emit failed: {err}");
@@ -658,18 +745,198 @@ async fn settlement_loop(mut ctx: SettleCtx) -> Result<SettlementSummary> {
         }
 
         if finishing {
-            let residual = ctx
+            let balance = ctx
                 .acct
                 .debug_snapshot(&ctx.peer_id)
                 .map_or(0, |(balance, _reserved)| balance);
-            if residual == 0 || summary.residual_debt_plur > 0 {
-                summary.residual_debt_plur = residual;
+            let residual = balance.saturating_sub(ctx.pending_cheque_units.load(Ordering::Relaxed));
+            if residual == 0 || summary.residual_debt_units > 0 {
+                summary.residual_debt_units = residual;
                 break;
             }
             // Loop once more to sweep what's left.
         }
     }
     Ok(summary)
+}
+
+struct RateEmitOutcome {
+    /// PLUR moved by this cheque (units × rate + deduction).
+    plur: u128,
+    plur_u256: U256,
+    rate: u128,
+    cumulative: U256,
+}
+
+/// Bee's swap wire done in full (ant's `emit_cheque` skips the header
+/// exchange): the receiver's headler announces the current oracle
+/// exchange rate (PLUR per accounting unit) and a one-time deduction;
+/// the cheque must move `units × rate + deduction` PLUR or the
+/// receiver credits the wrong amount — the first probe run proved bee
+/// then sees unsettled debt and disconnects. The announced rate is
+/// bounded by the run's spend guard; cross-checking it against the
+/// price-oracle contract is a follow-up (scheduler milestone).
+async fn emit_cheque_at_rate(ctx: &mut SettleCtx, debt_units: u64) -> Result<RateEmitOutcome> {
+    let mut stream = ctx
+        .control
+        .open_stream(
+            ctx.peer_id,
+            StreamProtocol::new(ant_p2p::swap::PROTOCOL_SWAP),
+        )
+        .await
+        .map_err(|e| anyhow!("open swap stream: {e}"))?;
+
+    // Dialer headers (empty), then the headler's response headers.
+    stream.write_all(&[0u8]).await?;
+    stream.flush().await?;
+    let response_headers = read_delimited(&mut stream, 8 * 1024).await?;
+    let (rate, deduction) = parse_settlement_headers(&response_headers)
+        .ok_or_else(|| anyhow!("peer sent no exchange-rate header"))?;
+    if rate.is_zero() {
+        bail!("peer announced a zero exchange rate");
+    }
+    // deduction goes to zero once the peer has recorded a cheque from
+    // us — seeing it stay non-zero on a later cheque means the earlier
+    // one was never accepted (how the quoted-JSON bug was caught).
+    tracing::info!(%rate, %deduction, "swap headers received");
+
+    let plur = rate
+        .checked_mul(U256::from(debt_units))
+        .and_then(|v| v.checked_add(deduction))
+        .ok_or_else(|| anyhow!("cheque amount overflow"))?;
+    let issued_so_far = U256::from(ctx.issued_plur);
+    if issued_so_far
+        .checked_add(plur)
+        .is_none_or(|total| total > U256::from(ctx.max_issue_plur))
+    {
+        bail!(
+            "spend guard: cheque of {plur} PLUR would exceed max_issue_plur={}",
+            ctx.max_issue_plur
+        );
+    }
+    let prev = ctx.ledger.cumulative_for(&ctx.beneficiary);
+    let cumulative = prev
+        .checked_add(plur)
+        .ok_or_else(|| anyhow!("cumulative overflow"))?;
+    if cumulative > ctx.issuable {
+        bail!(
+            "cached invariant: cumulative {cumulative} would exceed issuable {} — chequebook needs a deposit",
+            ctx.issuable
+        );
+    }
+
+    let signed = ant_p2p::swap::issue_cheque(
+        &ctx.secret,
+        ctx.chequebook,
+        ctx.beneficiary,
+        cumulative,
+        ctx.chain_id,
+    )?;
+    let cheque_json = encode_cheque_json_bee(&signed);
+    // EmitCheque { bytes cheque = 1 }, length-delimited on the wire.
+    let mut msg = Vec::with_capacity(cheque_json.len() + 8);
+    msg.push(0x0a);
+    encode_varint(cheque_json.len() as u64, &mut msg);
+    msg.extend_from_slice(&cheque_json);
+    let mut frame = Vec::with_capacity(msg.len() + 8);
+    encode_varint(msg.len() as u64, &mut frame);
+    frame.extend_from_slice(&msg);
+    stream.write_all(&frame).await?;
+    stream.flush().await?;
+    let _ = stream.close().await;
+
+    if let Err(err) = ctx.ledger.record_issued(&ctx.beneficiary, cumulative) {
+        tracing::warn!("outbound ledger persist failed after emit: {err}");
+    }
+    let plur_u128 = u128::try_from(plur).map_err(|_| anyhow!("cheque amount exceeds u128"))?;
+    ctx.issued_plur = ctx.issued_plur.saturating_add(plur_u128);
+    Ok(RateEmitOutcome {
+        plur: plur_u128,
+        plur_u256: plur,
+        rate: u128::try_from(rate).unwrap_or(u128::MAX),
+        cumulative,
+    })
+}
+
+/// Encode a `SignedCheque` in the exact JSON shape bee's
+/// `chequebook.SignedCheque` unmarshals. Found live in M2 run 4:
+/// `CumulativePayout` is Go's `math/big.Int`, whose `UnmarshalJSON`
+/// accepts only an UNQUOTED number — ant's
+/// `encode_signed_cheque_json` quotes it, so bee rejects every cheque
+/// with "unmarshal cheque" and never credits the payment (upstream
+/// ant bug to report). Addresses are 0x-hex, `Signature` is
+/// standard-padding base64 (geth `[]byte`).
+fn encode_cheque_json_bee(signed: &ant_chain::chequebook::SignedCheque) -> Vec<u8> {
+    use base64::Engine as _;
+    format!(
+        "{{\"Chequebook\":\"0x{}\",\"Beneficiary\":\"0x{}\",\"CumulativePayout\":{},\"Signature\":\"{}\"}}",
+        hex::encode(signed.cheque.chequebook),
+        hex::encode(signed.cheque.beneficiary),
+        signed.cheque.cumulative_payout,
+        base64::engine::general_purpose::STANDARD.encode(signed.signature),
+    )
+    .into_bytes()
+}
+
+/// Parse bee's headers protobuf: `Headers { repeated Header { string
+/// key = 1; bytes value = 2 } }`, returning the `exchange` rate and
+/// `deduction` (zero when absent, matching bee's payer side).
+fn parse_settlement_headers(body: &[u8]) -> Option<(U256, U256)> {
+    let mut exchange: Option<U256> = None;
+    let mut deduction = U256::zero();
+    let mut rest = body;
+    while !rest.is_empty() {
+        let (tag, after_tag) = decode_varint(rest)?;
+        rest = after_tag;
+        if tag >> 3 != 1 || tag & 0x7 != 2 {
+            return None;
+        }
+        let (len, after_len) = decode_varint(rest)?;
+        let len = usize::try_from(len).ok()?;
+        let header = after_len.get(..len)?;
+        rest = after_len.get(len..)?;
+
+        let mut key: &[u8] = &[];
+        let mut value: &[u8] = &[];
+        let mut inner = header;
+        while !inner.is_empty() {
+            let (itag, after) = decode_varint(inner)?;
+            inner = after;
+            if itag & 0x7 != 2 {
+                return None;
+            }
+            let (field_size, past_size) = decode_varint(inner)?;
+            let field_size = usize::try_from(field_size).ok()?;
+            let field = past_size.get(..field_size)?;
+            inner = past_size.get(field_size..)?;
+            match itag >> 3 {
+                1 => key = field,
+                2 => value = field,
+                _ => {}
+            }
+        }
+        if value.len() > 32 {
+            return None;
+        }
+        match key {
+            b"exchange" => exchange = Some(U256::from_big_endian(value)),
+            b"deduction" => deduction = U256::from_big_endian(value),
+            _ => {}
+        }
+    }
+    exchange.map(|rate| (rate, deduction))
+}
+
+fn encode_varint(mut value: u64, out: &mut Vec<u8>) {
+    loop {
+        let byte = u8::try_from(value & 0x7f).expect("masked to 7 bits");
+        value >>= 7;
+        if value == 0 {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
+    }
 }
 
 async fn read_delimited(
@@ -721,6 +988,26 @@ mod tests {
     fn rejects_garbage_threshold() {
         assert_eq!(parse_announce_threshold(&[0xff]), None);
         assert_eq!(parse_announce_threshold(&[]), None);
+    }
+
+    #[test]
+    fn cheque_json_matches_bee_shape() {
+        let signed = ant_chain::chequebook::SignedCheque {
+            cheque: ant_chain::chequebook::Cheque {
+                chequebook: [0x11; 20],
+                beneficiary: [0x22; 20],
+                cumulative_payout: U256::from(89_000_000_100u64),
+            },
+            signature: [0x33; 65],
+        };
+        let json = String::from_utf8(encode_cheque_json_bee(&signed)).unwrap();
+        // CumulativePayout MUST be an unquoted JSON number for Go's
+        // big.Int; addresses 0x-hex; signature base64.
+        assert!(json.contains("\"CumulativePayout\":89000000100,"), "{json}");
+        assert!(json.contains("\"Chequebook\":\"0x1111111111111111111111111111111111111111\""));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(parsed["CumulativePayout"].is_u64());
+        assert_eq!(parsed["Signature"].as_str().unwrap().len(), 88);
     }
 
     #[test]

@@ -48,8 +48,11 @@ pub struct ProbeArgs {
     #[arg(long, default_value = "https://rpc.gnosischain.com")]
     pub rpc_url: String,
     /// Spend guard: max PLUR issued as cheques this run
-    /// (default 1e12 PLUR = 0.0001 xBZZ).
-    #[arg(long, default_value_t = 1_000_000_000_000)]
+    /// (default 5e12 PLUR = 0.0005 xBZZ; a 200-chunk run cheques
+    /// ~1e12). TODO(M4): a tripped guard must stop FETCHING —
+    /// blocking the final sweep leaves debt unsettled (run 6 left
+    /// 450k units when the guard was 1e12).
+    #[arg(long, default_value_t = 5_000_000_000_000)]
     pub max_issue_plur: u64,
     #[arg(long, default_value_t = 1)]
     pub network_id: u64,
@@ -218,8 +221,14 @@ pub async fn run(args: ProbeArgs) -> i32 {
     );
     let s = &report.settlement;
     println!(
-        "settlement:      {} cheques = {} PLUR; {} refreshes = {} PLUR; residual debt {} PLUR",
-        s.cheques_issued, s.cheque_plur, s.refreshes_accepted, s.refresh_plur, s.residual_debt_plur
+        "settlement:      {} cheques = {} units = {} PLUR (rate {}); {} refreshes = {} units; residual debt {} units",
+        s.cheques_issued,
+        s.cheque_units,
+        s.cheque_plur,
+        s.exchange_rate.map_or_else(|| "-".into(), |r| r.to_string()),
+        s.refreshes_accepted,
+        s.refresh_units,
+        s.residual_debt_units
     );
     match &s.announced_threshold {
         Some(t) => println!("announced payment threshold: {t} PLUR"),
@@ -257,11 +266,11 @@ fn append_csv(
         .open(&args.csv_out)
         .map_err(|e| e.to_string())?;
     if new {
-        writeln!(file, "peer_overlay,requested,chunks_ok,chunks_err,bytes,wall_secs,mb_per_s,pipeline_depth,handshake_ms,lat_p50_ms,lat_p95_ms,cheques,cheque_plur,refreshes,refresh_plur,residual_debt_plur,announced_threshold").map_err(|e| e.to_string())?;
+        writeln!(file, "peer_overlay,requested,chunks_ok,chunks_err,bytes,wall_secs,mb_per_s,pipeline_depth,handshake_ms,lat_p50_ms,lat_p95_ms,cheques,cheque_units,cheque_plur,exchange_rate,refreshes,refresh_units,residual_debt_units,announced_threshold").map_err(|e| e.to_string())?;
     }
     writeln!(
         file,
-        "{},{requested},{},{},{},{:.2},{mbs:.4},{},{},{},{},{},{},{},{},{},{}",
+        "{},{requested},{},{},{},{:.2},{mbs:.4},{},{},{},{},{},{},{},{},{},{},{},{}",
         hex::encode(report.remote_overlay),
         report.chunks_ok,
         report.chunks_err,
@@ -272,10 +281,15 @@ fn append_csv(
         median(sorted_lat),
         percentile95(sorted_lat),
         report.settlement.cheques_issued,
+        report.settlement.cheque_units,
         report.settlement.cheque_plur,
+        report
+            .settlement
+            .exchange_rate
+            .map_or_else(String::new, |r| r.to_string()),
         report.settlement.refreshes_accepted,
-        report.settlement.refresh_plur,
-        report.settlement.residual_debt_plur,
+        report.settlement.refresh_units,
+        report.settlement.residual_debt_units,
         report
             .settlement
             .announced_threshold
