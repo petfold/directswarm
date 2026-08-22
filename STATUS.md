@@ -30,10 +30,10 @@ tier, labeled as such, never a strategy. Fix built and MEASURED: ~50-line cached
 5-peer 0.155→1.08 MB/s (7×), 20-peer 0.277→**4.56 MB/s (16×)**,
 cheques 5/s→62/s node-wide, aggregate now ~linear in connections;
 25 MB/s target needs ~110 connections at today's thresholds, fully
-settled. Bee issue drafted with before/after numbers
-(`upstream/bee-issue-chequebook-serialization.md`), self-contained (no
-directswarm disclosure), PR offered on request — **awaiting user
-approval to file**. Retrieval settlement spend now ~0.01 xBZZ total.
+settled. Bee issue **FILED (user-approved) as ethersphere/bee#5570** with
+before/after numbers, self-contained (no directswarm disclosure), PR
+offered on request — watch for maintainer response; patch ready on
+branch `chequebook-cached-balance`. Retrieval settlement spend now ~0.01 xBZZ total.
 **Phase-0 measurement set complete; human review gate open.**
 
 **Spend total this phase: ~1.17 xBZZ** (0.880 postage + 0.286 upload

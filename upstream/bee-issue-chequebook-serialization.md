@@ -1,7 +1,6 @@
-# DRAFT — bee issue (not yet filed; human review required before publishing)
+# FILED 2026-08-22 (user-approved): https://github.com/ethersphere/bee/issues/5570
 
-Target: github.com/ethersphere/bee (new issue, label suggestion: performance)
-File with: `gh issue create -R ethersphere/bee --title "..." --body-file <this, below the marker>`
+Text below is the filed version, kept verbatim for the record.
 Patch (ready to open as PR on request): local branch `chequebook-cached-balance`
 (worktree `.phase0/bee-patched`, one commit on top of current master-era code;
 applies to v2.8.1 cleanly).
