@@ -164,12 +164,19 @@ Depth 32, whole per-peer chunk sets, all peers in parallel:
 | 20 | 0.251 | 0.013 | majority of marginal gain is free-tier refresh |
 
 **Aggregate does not scale with connections today, and the reason is
-client-side:** bee's chequebook service serializes cheque issuance
-under one mutex held across the entire sign-and-send round trip
-(~90 ms), capping the whole client at ~5–6 cheques/s regardless of
-peer count (the identical global cheque counters across concurrent
-rows are the fingerprint; in concurrent-mode CSVs the cheque columns
-are global-window values, not per-peer). Per-peer pseudosettle refresh
+client-side.** Verified in bee's source after first inferring it from
+the identical global cheque counters across concurrent rows (in
+concurrent-mode CSVs the cheque columns are global-window values, not
+per-peer): every cheque issuance re-verifies the chequebook's covering
+balance **via two on-chain RPC calls (`Balance` + `TotalPaidOut`)
+under one global mutex** (`chequebook.reserveTotalIssued` →
+`AvailableBalance`) — two ~100 ms round trips to a rate-limited public
+RPC per cheque, serialized client-wide → ~5–6 cheques/s per client
+regardless of peer count. The p2p send itself is NOT under the lock.
+Notably, `balance + totalPaidOut` is invariant under cash-outs (value
+moves from balance to paidOut) and changes only on the owner's own
+deposits/withdrawals — so the quantity is trivially cacheable and the
+per-cheque RPCs buy nothing. Per-peer pseudosettle refresh
 DOES stack (each peer grants 450k units/s), which is why aggregate
 creeps up with peer count — but that marginal throughput is free-tier
 funded: exactly the per-peer credit aggregation weightstation's report
@@ -179,14 +186,15 @@ flags as a loophole to report, not a strategy. Labeled accordingly:
 
 The fix hierarchy, and why the design survives:
 
-1. **Client-side, protocol-compliant**: cumulative cheques only need
-   ordering *per beneficiary*; the global mutex is an implementation
-   convenience. Per-beneficiary issuance locking makes each
-   connection's cheque cadence its own wire-RTT-bound ~11 cheques/s ≈
-   ~0.28 MB/s paid per connection — then ~90 connections reach the
-   25 MB/s target at today's thresholds. This is Phase-1 engineering
-   in our own client (bee-as-library's lock replaced, wire protocol
-   untouched), plus a small upstream patch suggestion to bee.
+1. **Client-side, protocol-compliant**: cache `balance + totalPaidOut`
+   (refresh only on own deposits/withdrawals) so balance reservation
+   is pure memory, and order issuance per beneficiary (cumulative
+   cheques only need per-beneficiary ordering). Each connection's
+   cheque cadence then becomes its own wire-RTT-bound ~11 cheques/s ≈
+   ~0.28 MB/s paid per connection — ~90 connections reach the 25 MB/s
+   target at today's thresholds. Phase-1 engineering in our own client
+   (wire protocol and contract semantics untouched), plus a small
+   upstream performance issue/PR for bee itself.
 2. **Upstream policy**: light-peer threshold scaling with demonstrated
    settlement lifts the per-connection ceiling ~10× further (ties
    directly into the funding-is-not-incentivised report).

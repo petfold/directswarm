@@ -21,8 +21,9 @@ Full report: **REPORT-phase0.md** (raw CSVs in `.phase0/`). Headline:
 
 **Aggregate concurrency measured (user-approved option 1):** 1/5/20
 parallel peers → 0.074/0.149/0.251 MB/s aggregate — sublinear because
-**bee's chequebook serializes cheque issuance under one global mutex
-held across the sign-and-send round trip (~5–6 cheques/s per client)**;
+**bee's chequebook re-verifies covering balance via two on-chain RPC
+calls under one global mutex on every cheque (~5–6 cheques/s per
+client; verified in source, `reserveTotalIssued`→`AvailableBalance`)**;
 the marginal gain at high peer counts is stacked pseudosettle free
 tier, labeled as such, never a strategy. Fix hierarchy in
 REPORT-phase0.md: per-beneficiary issuance locking (client-side,
