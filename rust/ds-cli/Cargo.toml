@@ -11,8 +11,11 @@ name = "directswarm"
 path = "src/main.rs"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 ds-core = { path = "../ds-core" }
 ds-net = { path = "../ds-net" }
+hex = "0.4.3"
+tokio = { version = "1.44.2", features = ["macros", "rt-multi-thread"] }
 
 [lints]
 workspace = true

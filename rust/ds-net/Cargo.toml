@@ -8,10 +8,18 @@ repository.workspace = true
 
 [dependencies]
 ds-core = { path = "../ds-core" }
-# ant wire crates land here as milestones need them (M1: ant-retrieval
-# manifest layer via a bee-API ChunkFetcher; M2: ant-p2p handshake +
-# retrieval + settlement, ant-chain). Path deps during development,
-# pinned to a git rev before anything ships.
+# ant wire crates, added as milestones need them. Path deps during
+# development, pinned to a git rev before anything ships.
+# M1: manifest/joiner layer + chunk validation (bee-API fallback path).
+# M2 adds ant-p2p (handshake/retrieval/settlement wire) and ant-chain.
+ant-crypto = { path = "../../../ant/crates/ant-crypto" }
+ant-retrieval = { path = "../../../ant/crates/ant-retrieval" }
+async-trait = "0.1.89"
+hex = "0.4.3"
+# Talks only to the local bee node over plain HTTP — no TLS features.
+reqwest = { version = "0.12", default-features = false }
+thiserror = "2.0.12"
+tokio = { version = "1.44.2", features = ["fs", "io-util", "sync", "time"] }
 
 [lints]
 workspace = true

@@ -1,10 +1,143 @@
-//! directswarm CLI. M1 delivers `directswarm fetch <ref> [-o file]`
-//! over the forwarding-fallback path; the fast plane layers in from M2.
+//! directswarm CLI.
+//!
+//! M1 scope: `directswarm fetch <ref> [-o file]` over the forwarding
+//! fallback (local bee node); the fast plane layers in from M2.
 
-fn main() {
+use clap::{Parser, Subcommand};
+use ds_net::BeeApiFetcher;
+use std::path::PathBuf;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+#[derive(Parser)]
+#[command(
+    name = "directswarm",
+    version,
+    about = "fast data plane for Ethereum Swarm"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Fetch the file behind a Swarm reference, verified chunk by chunk.
+    Fetch {
+        /// 64-hex Swarm reference (bytes root).
+        reference: String,
+        /// Output file (default: <first 16 hex of ref>.bin).
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Bee API of the local node used as the retrieval path (M1)
+        /// and forwarding fallback (M2+).
+        #[arg(long, default_value = "http://localhost:1633")]
+        bee_url: String,
+    },
+}
+
+fn parse_ref(reference: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(reference).map_err(|err| format!("reference is not hex: {err}"))?;
+    <[u8; 32]>::try_from(bytes).map_err(|bytes| {
+        format!(
+            "reference must be 32 bytes (64 hex chars), got {} bytes \
+             (encrypted 64-byte references land in a later milestone)",
+            bytes.len()
+        )
+    })
+}
+
+#[tokio::main]
+async fn main() {
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Fetch {
+            reference,
+            output,
+            bee_url,
+        } => {
+            let code = fetch_command(&reference, output, &bee_url).await;
+            std::process::exit(code);
+        }
+    }
+}
+
+async fn fetch_command(reference: &str, output: Option<PathBuf>, bee_url: &str) -> i32 {
+    let root = match parse_ref(reference) {
+        Ok(root) => root,
+        Err(err) => {
+            eprintln!("error: {err}");
+            return 2;
+        }
+    };
+    let out_path = output.unwrap_or_else(|| PathBuf::from(format!("{}.bin", &reference[..16])));
+    let fetcher = match BeeApiFetcher::new(bee_url) {
+        Ok(fetcher) => fetcher,
+        Err(err) => {
+            eprintln!("error: building HTTP client: {err}");
+            return 1;
+        }
+    };
+
+    let started = Instant::now();
+    let last_report = Mutex::new((Instant::now(), 0u64));
+    let progress = move |done: u64, total: u64| {
+        let mut guard = last_report.lock().expect("progress mutex");
+        let (last_at, last_done) = *guard;
+        let now = Instant::now();
+        let dt = now.duration_since(last_at);
+        if dt < Duration::from_secs(2) {
+            return;
+        }
+        let rate = rate_mbs(done - last_done, dt);
+        *guard = (now, done);
+        drop(guard);
+        if total > 0 {
+            let pct = percent(done, total);
+            eprintln!("{done}/{total} bytes ({pct:.1}%), {rate:.2} MB/s");
+        } else {
+            eprintln!("{done} bytes, {rate:.2} MB/s");
+        }
+    };
+
     eprintln!(
-        "directswarm {}: fetch is not implemented yet (Phase 1, M1)",
-        env!("CARGO_PKG_VERSION")
+        "fetching {reference} -> {} via {bee_url}",
+        out_path.display()
     );
-    std::process::exit(2);
+    match ds_net::fetch_to_file(&fetcher, root, &out_path, &progress).await {
+        Ok(outcome) => {
+            let elapsed = started.elapsed();
+            let rate = rate_mbs(outcome.bytes_written, elapsed);
+            if outcome.resumed_from > 0 {
+                eprintln!("resumed from byte {}", outcome.resumed_from);
+            }
+            eprintln!(
+                "done: {} bytes verified -> {} in {:.1}s ({rate:.2} MB/s, {} chunks; \
+                 path: forwarding fallback via local bee, settled by the bee node)",
+                outcome.total_span,
+                out_path.display(),
+                elapsed.as_secs_f64(),
+                fetcher.chunks_fetched(),
+            );
+            0
+        }
+        Err(err) => {
+            eprintln!("error: {err}");
+            eprintln!("(progress is committed; rerunning the same command resumes)");
+            1
+        }
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn percent(done: u64, total: u64) -> f64 {
+    100.0 * done as f64 / total as f64
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn rate_mbs(bytes: u64, elapsed: Duration) -> f64 {
+    if elapsed.is_zero() {
+        return 0.0;
+    }
+    bytes as f64 / 1e6 / elapsed.as_secs_f64()
 }

@@ -5,6 +5,8 @@
 //! future browser adapter drive it. This crate compiles for
 //! `wasm32-unknown-unknown`; CI enforces that from the first commit.
 
+pub mod resume;
 pub mod swarm;
 
+pub use resume::{ResumeState, SIDECAR_SUFFIX};
 pub use swarm::{neighborhood, proximity, SwarmAddress, MAX_PO};
