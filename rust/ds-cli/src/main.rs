@@ -3,6 +3,8 @@
 //! M1 scope: `directswarm fetch <ref> [-o file]` over the forwarding
 //! fallback (local bee node); the fast plane layers in from M2.
 
+mod probe;
+
 use clap::{Parser, Subcommand};
 use ds_net::BeeApiFetcher;
 use std::path::PathBuf;
@@ -34,6 +36,8 @@ enum Command {
         #[arg(long, default_value = "http://localhost:1633")]
         bee_url: String,
     },
+    /// M2 dev probe: one direct, settled storer stream, measured.
+    ProbeStorer(Box<probe::ProbeArgs>),
 }
 
 fn parse_ref(reference: &str) -> Result<[u8; 32], String> {
@@ -49,6 +53,13 @@ fn parse_ref(reference: &str) -> Result<[u8; 32], String> {
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
     let cli = Cli::parse();
     match cli.command {
         Command::Fetch {
@@ -57,6 +68,10 @@ async fn main() {
             bee_url,
         } => {
             let code = fetch_command(&reference, output, &bee_url).await;
+            std::process::exit(code);
+        }
+        Command::ProbeStorer(args) => {
+            let code = probe::run(*args).await;
             std::process::exit(code);
         }
     }
