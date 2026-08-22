@@ -1,0 +1,18 @@
+[package]
+name = "ds-cli"
+description = "directswarm CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "directswarm"
+path = "src/main.rs"
+
+[dependencies]
+ds-core = { path = "../ds-core" }
+ds-net = { path = "../ds-net" }
+
+[lints]
+workspace = true

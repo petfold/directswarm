@@ -1,0 +1,25 @@
+name: ci
+on:
+  push:
+    paths: ["rust/**", ".github/workflows/ci.yml"]
+  pull_request:
+    paths: ["rust/**", ".github/workflows/ci.yml"]
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run: { working-directory: rust }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      # Day-one discipline (DESIGN.md): the sans-I/O core must always
+      # compile for the browser target, long before anything browser-
+      # facing ships.
+      - run: cargo check -p ds-core --target wasm32-unknown-unknown

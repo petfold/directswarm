@@ -1,0 +1,14 @@
+[package]
+name = "ds-core"
+description = "directswarm sans-I/O core: scheduler, topology model, settlement policy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Day-one rule (DESIGN.md "Components", 4): no sockets, no owned clocks,
+# no tokio. This crate must keep compiling for wasm32-unknown-unknown.
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "ds-net"
+description = "directswarm native adapter: libp2p transport, Bee wire protocols, settlement I/O"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+ds-core = { path = "../ds-core" }
+# ant wire crates land here as milestones need them (M1: ant-retrieval
+# manifest layer via a bee-API ChunkFetcher; M2: ant-p2p handshake +
+# retrieval + settlement, ant-chain). Path deps during development,
+# pinned to a git rev before anything ships.
+
+[lints]
+workspace = true
