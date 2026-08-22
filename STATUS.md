@@ -1,5 +1,93 @@
 # directswarm — STATUS
 
+## 2026-08-23 — M5 groundwork: decision experiment MEASURED — threshold
+## growth + validation latency; 25 MB/s path confirmed, NO design rethink
+
+**Context:** post-M4 review question ("did the phase fail? rethink the
+design?"). Answer: M4 did not fail — every milestone's results stand;
+the open risk was whether the 25 MB/s target's arithmetic (per-conn
+rate × ~110 conns) survives contact with bee's real settlement
+behavior. Ran the decisive experiment before building M5.
+
+**Built:** `directswarm probe-growth` (ds-net/src/growth.rs + CLI) —
+one long-lived, fully settled storer connection with three phases:
+(A) *growth*: continuous paced fetch cycling the storer's neighborhood
+chunk set, threshold-adaptive pacing, every pricing announcement
+logged; (B) *λ sampling*: quiesce, sweep debt with one cheque, then
+tiny (50k-unit) pseudosettle probes — bee ACKs
+`min(attempted, allowance, its-debt-view)`, so the ACK drops to zero
+exactly when the cheque credits → per-peer cheque-validation latency
+at ±1.15 s resolution; (C) *ceiling*: λ-aware exposure pacing (mirror
+debt + reserved + unvalidated-cheques-in-λ-window ≤ 1.05 × T) measuring
+sustained per-conn rate at the grown threshold. Every run ends with a
+sweep + a bee-side zero-debt confirmation probe. Events per run in
+`.phase1/growth/*.jsonl`, summaries in `.phase1/m5-growth.csv`.
+
+**Verified in bee source first** (pkg/accounting): threshold growth is
+real, VOLUME-driven, and announced — a light peer starts at 1.35M
+units and gains +450k (lightRefreshRate) each time its cumulative
+settled debt crosses checkpoints of 45M units, linear until T≈9.45M
+(~15 MB paid), then exponentially spaced checkpoints (near-plateau);
+each upgrade is announced via the pricing stream. Persists in the
+storer's memory across our reconnects (while their bee runs).
+
+**Measured (13 live runs, 11 distinct storers, Ethernet):**
+1. **Growth curve confirmed exactly**: pilot (M2's storer 1e9d7cc9…)
+   walked 1.35M → 9.45M in the predicted 18 linear steps (~60 s/step at
+   our settle rate), then entered the exponential phase (→9.9M at the
+   predicted 1.62B cumulative) — 3,592 fetches, 0 errors, 211 cheques
+   all accepted. Grown threshold re-announced on reconnect.
+2. **Validation latency λ (the swing variable): 10/11 storers are
+   FAST** — λ ≤ 1.2–1.5 s, all probe-resolution-limited (true λ likely
+   well under 1 s); 1/11 (157.180.102.154) is slow at ~18 s
+   (their RPC). λ is per-operator infrastructure → a storer-selection
+   criterion alongside RTT.
+3. **Sustained settled per-connection rate** (phase C, 3-min runs,
+   zero errors, zero residual — bee-side confirmed): **0.081 MB/s** at
+   grown light threshold (T≈9.45M); **0.139 MB/s** on a high-threshold
+   operator (T=13.5M fresh → 27M by run end). NOTE: 3/10 sweep storers
+   announce 13.5M (full-node default) to fresh strangers — a
+   no-warm-up fast lane that grows at full-rate steps (+4.5M/checkpoint).
+4. **Two implementation bugs found by the pilot, fixed**: (a) ant's
+   `Accounting::try_reserve` hard-caps balance+reserved at the FRESH
+   light disconnect limit, silently re-capping any grown-threshold
+   connection to free-tier pacing (~0.008 MB/s) — replaced with a
+   threshold-aware single-peer mirror in growth.rs (ant kept stock;
+   candidate upstream note, user-gated); (b) probe launch script needed
+   its output dir (trivial).
+
+**Verdict: NO design rethink.** The M4 slowness decomposes fully into
+(i) fresh-threshold pacing — cured by volume-driven growth we can now
+drive deliberately, (ii) λ-safe pacing conservatism — cured by exposure
+control and λ-aware storer selection, (iii) the fixed mirror cap bug.
+Path to 25 MB/s: 0.139 MB/s/conn × ~180 conns TODAY on high-threshold
+fast-λ storers; ~110 conns needs ~0.23 MB/s/conn, plausible via M5
+(exposure AIMD instead of resolution-capped λ̂ pacing, longer-lived
+connections growing T past 27M, storer selection by threshold + λ).
+Warm-up economics: growing a light connection to plateau costs ~15 MB
+of paid traffic ≈ 0.008 xBZZ per storer, persists across reconnects →
+argues for the design's long-lived daemon/connection-reuse posture.
+
+**M5 plan sharpened by this data:** per-peer state (threshold, λ,
+cumulative-settled) persisted in the topology cache; exposure-based
+pacing; storer selection = coverage × RTT × threshold × λ; slow-λ
+storers deprioritized, never blacklisted (etiquette).
+
+**Etiquette ledger:** 13 dials (11 distinct peers, one attempt each,
+sequential, ≤1 conn at a time); long-lived connections held 3–25 min
+each, all politely disconnected after zero-debt confirmation; no
+refusals, no blocklists tripped this session. Chunk set cycled
+(re-fetches paid full price — settlement-pacing measurement, labeled).
+
+| spend item (this entry) | amount |
+|---|---|
+| probe cheques, 13 runs (1.9B units settled) | 0.0219 xBZZ |
+| pseudosettle free tier consumed | ~0.8B units (protocol allowance) |
+
+Spike chequebook lifetime cumulative now 0.0295 xBZZ of ~0.99
+available. Wallet after user top-up: 20.47 xBZZ / 1.19 xDAI (batch
+47265a62 TTL 6.66 d at entry — next top-up funded).
+
 ## 2026-08-22 — PHASE 0 GATE: **GO** (human review held) — Phase 1 starts
 
 **Human review outcome (user, 2026-08-22):** Go — start Phase 1

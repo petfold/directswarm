@@ -349,10 +349,10 @@ pub async fn probe_storer(
 }
 
 #[derive(libp2p::swarm::NetworkBehaviour)]
-struct Behaviour {
-    stream: StreamBehaviour,
-    identify: identify::Behaviour,
-    ping: ping::Behaviour,
+pub(crate) struct Behaviour {
+    pub(crate) stream: StreamBehaviour,
+    pub(crate) identify: identify::Behaviour,
+    pub(crate) ping: ping::Behaviour,
 }
 
 pub(crate) fn extract_peer_id(addr: &Multiaddr) -> Option<PeerId> {
@@ -398,7 +398,10 @@ pub(crate) async fn read_chequebook_issuable_raw(
     Ok(total)
 }
 
-async fn wait_connected(swarm: &mut libp2p::Swarm<Behaviour>, want: PeerId) -> Result<Multiaddr> {
+pub(crate) async fn wait_connected(
+    swarm: &mut libp2p::Swarm<Behaviour>,
+    want: PeerId,
+) -> Result<Multiaddr> {
     let deadline = Instant::now() + DIAL_TIMEOUT;
     let mut connected_addr: Option<Multiaddr> = None;
     loop {
@@ -499,7 +502,10 @@ const PROTOCOL_HIVE_V1: &str = "/swarm/hive/1.1.0/peers";
 /// Claim every protocol bee opens toward us. Pricing is PARSED (ant
 /// drains it): the `AnnouncePaymentThreshold` big-endian big.Int is the
 /// number that paces every connection — Phase 0's whole story.
-fn mount_sinks(control: &mut Control, threshold_tx: watch::Sender<Option<U256>>) -> Result<()> {
+pub(crate) fn mount_sinks(
+    control: &mut Control,
+    threshold_tx: watch::Sender<Option<U256>>,
+) -> Result<()> {
     let accept = |control: &mut Control, proto: &'static str| -> Result<IncomingStreams> {
         control
             .accept(StreamProtocol::new(proto))

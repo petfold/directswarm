@@ -5,6 +5,7 @@
 
 mod crawl;
 mod fetchdirect;
+mod growth_cmd;
 mod probe;
 
 use clap::{Parser, Subcommand};
@@ -44,6 +45,9 @@ enum Command {
     Crawl(Box<crawl::CrawlArgs>),
     /// M4: multi-connection settled fetch across the topology cache.
     FetchDirect(Box<fetchdirect::FetchDirectArgs>),
+    /// M5 groundwork: threshold-growth + cheque-validation-latency probe
+    /// against one storer (long-lived settled connection).
+    ProbeGrowth(Box<growth_cmd::GrowthArgs>),
 }
 
 fn parse_ref(reference: &str) -> Result<[u8; 32], String> {
@@ -86,6 +90,10 @@ async fn main() {
         }
         Command::FetchDirect(args) => {
             let code = fetchdirect::run(*args).await;
+            std::process::exit(code);
+        }
+        Command::ProbeGrowth(args) => {
+            let code = growth_cmd::run(*args).await;
             std::process::exit(code);
         }
     }
