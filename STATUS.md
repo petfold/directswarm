@@ -1,5 +1,126 @@
 # directswarm — STATUS
 
+## 2026-08-22 — PHASE 0 MEASUREMENTS COMPLETE — human review gate open
+
+Full report: **REPORT-phase0.md** (raw CSVs in `.phase0/`). Headline:
+
+- **Reachability gate: PASS** — 41/41 sampled storers accept a
+  stranger's dial+handshake (gate ≥50%).
+- **Service-rate gate: FAILS AS WRITTEN, for a reason the plan didn't
+  enumerate** — median peak 0.074 MB/s per storer (gate ≥1 MB/s), but
+  with ZERO refusals in 39 settled runs and storer bursts ≥0.35 MB/s:
+  the ceiling is the light-peer payment threshold pacing our own
+  settlement (40,481 overdraft waits), not storer policy. Aggregate
+  still scales with concurrent connections (unmeasured — next ask).
+- 1-hop price confirmed ~29% cheaper than forwarding in protocol units
+  (219,936 vs ~310k units/chunk); 901 real cheques accepted by 10
+  strangers, 0.0065 xBZZ settled.
+- Milestone-2 debugging findings folded into the report: a client must
+  mount pricing AND hive to be tolerated at all; depth-100 pipelines
+  push peers to disconnect-limit (cap 32 in future).
+
+**Awaiting human review (CLAUDE.md Phase-0 gate):** proposed next step
+is the aggregate-concurrency measurement (5–20 parallel storers,
+depth ≤32 — needs a fresh etiquette blessing), then fold everything
+into the Phase-2 upstream write-up ("storers are open; the credit
+policy is the funnel"). Phase 1 should not start before the
+concurrency result.
+
+**Spend total this phase: ~1.17 xBZZ** (0.880 postage + 0.286 upload
+settlement + 0.0065 retrieval settlement + gas dust). Balances:
+Nook wallet ~2.28 xBZZ / 0.55 xDAI, Nook chequebook ~2.28 xBZZ
+available; spike wallet 0.5 xBZZ / ~0.1 xDAI, spike chequebook
+~0.99 xBZZ available.
+
+## 2026-08-22 — Phase 0 in progress (live session)
+
+**Environment:** Nook's bee 2.8.1 light node (localhost:1633), 137
+peers, depth 9. Laptop moved from wifi to Ethernet mid-session (before
+any measured retrieval runs; payload upload started on wifi, finished
+on Ethernet — logistics, not a benchmark claim).
+
+**Done so far:**
+- Test payload live on mainnet: 1 GiB deterministic (wsbench seed 1),
+  ref `842efaa92f86fe67dd7bd244a7c7935cade4da1eee41ea558f49c00da90a759a`,
+  all 264,209 chunks tag-verified synced; local accept 2.80 MB/s.
+  Batch `47265a62…` depth-21 mutable, ~3.1 days TTL left, utilization
+  0.47 after upload.
+- Spike milestone 1 (`spike/cmd/reach`, bee-as-library, compiles
+  clean): reachability probe. Run 1+2 collected zero hive records —
+  mainnet bootnodes never announced to us (finding to investigate:
+  that's how stock light nodes are meant to bootstrap), and bee's
+  dialer silently drops private/loopback underlays without
+  `AllowPrivateCIDRs` (fixed). Also: bootnode `libp2p.direct` /ws
+  underlays are rejected as unsupported transport — data point for the
+  browser-transport story. Run 3 (seeded from Nook's node) in flight.
+- Etiquette caps blessed by user for the probe: ≤3 bootnode connects,
+  90 s passive listen, ≤50 dials at ≤2/s, one attempt per node, no
+  retries, polite disconnects, 15-min hard cap.
+
+**Reachability probe — first results (run 7, 2026-08-22, Ethernet):**
+41 full-node records collected from 3 seed announces (35 distinct
+depth-9 neighborhoods); **41/41 sampled nodes accepted a dial + full
+bee handshake from an unknown light peer (100%)**. Dial+handshake
+wall-clock: median 191 ms, p25 189, p75 346, p95 559, max 891 (2–3
+round trips + crypto — network RTT is roughly a third). Caveats,
+honestly: the sample is *biased toward reachable nodes* (records are
+peers currently connected to three healthy full nodes, and hive only
+gossips full nodes), and n=41 came from one announce burst. Gate-grade
+reachability needs a snowball crawl with a larger cap (needs a new
+etiquette blessing). Raw rows: `.phase0/reach.csv`.
+
+**Protocol findings from the debugging path (runs 1–6):**
+1. **Mounting hive alone gets you ejected**: stock peers open a
+   pricing stream right after the handshake to announce their payment
+   threshold; a client that can't accept it is disconnected within
+   seconds. Any directswarm client must mount pricing/accounting from
+   the first dial. (This is also a nice fact upstream: the network
+   already refuses accounting-incapable peers.)
+2. **Bootnodes don't bulk-announce**: their own bins are empty
+   (bootnode mode kicks everyone), so a hanging light peer gets only a
+   drip of records as new full nodes connect. Ordinary full nodes
+   announce their whole connected set immediately — seed crawls from
+   full nodes, not bootnodes.
+3. **bee dialers refuse to keep light peers** (`ErrDialLightNode`) —
+   S2 client↔client connections (Phase 4) cannot ride stock bee's
+   Connect as-is; relevant to OPEN-QUESTIONS 11.
+4. bee's libp2p service panics without a topology notifier
+   (reachability worker); a kademlia-less client must install a no-op
+   PickyNotifier. Also: `AllowPrivateCIDRs` needed for loopback/LAN
+   dials; bootnode `libp2p.direct` /ws underlays are unsupported by
+   bee's own transport set (browser-transport data point).
+Seeding note: probe bootstraps from swarmscan (public explorer) — fine
+for a spike; the real crawler should snowball from bootnode drip alone
+to avoid any external dependency.
+
+**Spike settlement identity (milestone 2, live):** eth
+0xDEdAc9Ac6BaDD4B4C9ff99e4B54f3E8835892E8A, overlay b52342…, own
+chequebook **0xE8C7aD1Af8CAb91E2695EfD1a12dBfCc186dFD41** (deploy tx
+0xd61c96…), 1.0 xBZZ deposited/available, 0.5 xBZZ + ~0.1 xDAI in its
+wallet. Chunk enumeration verified offline: 264,209 chunks, computed
+root == mainnet ref (ROOT CHECK PASS). Nook config gained
+`withdrawal-addresses-whitelist` (spike address only).
+
+**Spend ledger (this session):**
+| item | amount |
+|---|---|
+| postage batch 47265a62 (depth 21, mutable) | 0.880 xBZZ |
+| upload sync settlement (1 GiB pushsync)    | 0.286 xBZZ |
+| wallet→chequebook deposit (tx 0x4b2bda…)   | (2.000 xBZZ moved, not spent) |
+| Nook wallet → spike wallet (txs 0x9ce874…, 0xbf5f60…) | (1.5 xBZZ + 0.1 xDAI moved) |
+| spike chequebook deploy+deposit gas        | ~0.000005 xDAI |
+| spike chequebook deposit                   | (1.0 xBZZ moved, spends as settlement during measurement) |
+| **total spent** | **1.166 xBZZ (+gas dust)** |
+
+Standing grants added to CLAUDE.md: batch purchases/top-ups AND
+wallet→chequebook deposits when necessary (user, 2026-08-22).
+Chequebook available after deposit: ~2.28 xBZZ.
+
+Balances after upload: wallet ~5.78 xBZZ + 0.667 xDAI; chequebook
+available **0.281 xBZZ** (total 3.026). Retrieval runs need ~1–1.7
+xBZZ settled → wallet→chequebook deposit of 2 xBZZ proposed, awaiting
+user approval.
+
 ## 2026-08-22 — pre-flight approvals; design stage closed
 
 Human approvals, defaults accepted: **Q5 posture confirmed** (spike

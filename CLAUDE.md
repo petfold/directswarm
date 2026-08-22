@@ -59,7 +59,13 @@ drafts).
 ## Spending rules
 
 Settlement and any stamp/chequebook operations spend the user's real
-xBZZ. Estimate before running, confirm anything beyond trivial amounts,
+xBZZ. **Standing grants (2026-08-22): postage-batch purchases/top-ups
+AND wallet→chequebook deposits when necessary are pre-authorized** —
+estimate first, log every spend to the STATUS.md ledger, no per-action
+confirmation needed; warn the user when balances run low so they can
+top up. For
+everything else: estimate before running, confirm anything beyond
+trivial amounts,
 snapshot chequebook balances around measured runs (the weightstation
 burn-accounting pattern), and keep a spend ledger in STATUS.md.
 
