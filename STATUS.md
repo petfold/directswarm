@@ -1,5 +1,41 @@
 # directswarm — STATUS
 
+## 2026-08-22 — PHASE 0 GATE: **GO** (human review held) — Phase 1 starts
+
+**Human review outcome (user, 2026-08-22):** Go — start Phase 1
+(fetcher MVP, S1 storer-direct, Rust/ant substrate per design rev 2.4),
+with the 25 MB/s acceptance target kept as written and understood to
+require ~110 concurrent connections at today's light-peer thresholds
+(one light slot per storer, hundreds of neighborhoods available —
+within etiquette). Rationale accepted: the service-rate gate failed
+as written but for a client-side reason (light-peer credit pacing +
+bee chequebook serialization), not storer policy — storers gave zero
+refusals; patched-chequebook aggregate scales ~linearly (4.56 MB/s at
+20 peers, fully settled). Our own Rust SWAP implementation issues
+cheques with the cached invariant natively, so Phase 1 does not block
+on upstream. Exits A/B rejected as not matching the measured facts.
+
+**Bee PR decision (user):** keep the PR unsubmitted; the issue
+(ethersphere/bee#5570, still zero comments) already offers it on
+request — submit only if a maintainer asks. Keep watching the issue.
+
+**Payload logistics:** batch `47265a62…` topped up +4 days
+(amount +5,329,082,880/chunk, tx `0x69a5b024…`) → TTL **6.94 days**;
+cost **1.118 xBZZ** (standing top-up grant). Keeping the payload alive
+costs ~0.28 xBZZ/day at today's price (77,099 PLUR/chunk/block,
+depth 21).
+
+**⚠ BALANCES LOW — user top-up needed:** Nook wallet now
+**0.47 xBZZ** / 0.57 xDAI. The next batch top-up (~1.1 xBZZ/4 days)
+exceeds the wallet; Phase-1 measured runs will also need settled
+retrieval (Phase-0 scale suggests ~0.01–0.1 xBZZ per measured GiB
+sweep, plus chequebook headroom). Suggest topping the wallet to
+~5 xBZZ to cover the phase.
+
+| spend item (this entry) | amount |
+|---|---|
+| batch 47265a62 top-up, +4 days TTL | 1.118 xBZZ |
+
 ## 2026-08-22 — PHASE 0 MEASUREMENTS COMPLETE — human review gate open
 
 Full report: **REPORT-phase0.md** (raw CSVs in `.phase0/`). Headline:
