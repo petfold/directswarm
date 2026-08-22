@@ -28,6 +28,8 @@ libp2p = { version = "0.56.0", features = [
 ] }
 libp2p-stream = "0.4.0-alpha"
 primitive-types = { version = "0.14.0", default-features = false }
+prost = "0.13"
+unsigned-varint = { version = "0.8.0", features = ["futures"] }
 # Talks only to the local bee node over plain HTTP — no TLS features
 # (the Gnosis RPC lives behind ant-chain's own client).
 reqwest = { version = "0.12", default-features = false }

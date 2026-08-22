@@ -7,6 +7,8 @@
 
 pub mod resume;
 pub mod swarm;
+pub mod topology;
 
 pub use resume::{ResumeState, SIDECAR_SUFFIX};
 pub use swarm::{neighborhood, proximity, SwarmAddress, MAX_PO};
+pub use topology::{Coverage, NodeRecord, TopologyCache};

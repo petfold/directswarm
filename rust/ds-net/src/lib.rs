@@ -10,8 +10,10 @@
 //! M2: one direct, settled storer stream — [`direct::probe_storer`].
 
 pub mod bee_api;
+pub mod crawl;
 pub mod direct;
 pub mod fetch;
+pub mod hive;
 pub mod identity;
 pub mod keystore;
 

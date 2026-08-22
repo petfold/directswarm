@@ -3,6 +3,7 @@
 //! M1 scope: `directswarm fetch <ref> [-o file]` over the forwarding
 //! fallback (local bee node); the fast plane layers in from M2.
 
+mod crawl;
 mod probe;
 
 use clap::{Parser, Subcommand};
@@ -38,6 +39,8 @@ enum Command {
     },
     /// M2 dev probe: one direct, settled storer stream, measured.
     ProbeStorer(Box<probe::ProbeArgs>),
+    /// M3: bounded polite hive crawl building the topology cache.
+    Crawl(Box<crawl::CrawlArgs>),
 }
 
 fn parse_ref(reference: &str) -> Result<[u8; 32], String> {
@@ -72,6 +75,10 @@ async fn main() {
         }
         Command::ProbeStorer(args) => {
             let code = probe::run(*args).await;
+            std::process::exit(code);
+        }
+        Command::Crawl(args) => {
+            let code = crawl::run(*args).await;
             std::process::exit(code);
         }
     }
