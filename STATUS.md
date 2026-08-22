@@ -36,6 +36,24 @@ sweep, plus chequebook headroom). Suggest topping the wallet to
 |---|---|
 | batch 47265a62 top-up, +4 days TTL | 1.118 xBZZ |
 
+**Phase 1 M3 done (same day): topology cache + polite crawler,
+measured.** `directswarm crawl` — bounded snowball: seed dials (from
+Phase-0 reach.csv), BZZ handshake with RTT recorded, ~4 s gossip
+harvest per peer, strict etiquette (≤40 dials/run at ≤2/s, one
+attempt, no retries, polite disconnects, 10-min cap — inside the
+Phase-0 blessing). Two runs, 80/80 dials accepted, ~910 hive hints
+each; **union cache 1,142 distinct storers covering 399/512 payload
+neighborhoods = 77.9% of the 1 GiB chunk set**, in ~3 min/run, spend
+0 (no retrieval, no cheques). Sans-I/O `TopologyCache` in ds-core
+(wasm-clean, RTT-sorted `storers_for()` per the latency-aware
+selection design); hive protobuf + bee-2.8 multi-underlay decode in
+ds-net. Full coverage path: either a larger crawl (needs a fresh
+etiquette blessing, ~200+ dials) or M4's lazy prefix-targeted lookups
+with forwarding fallback for the tail — the design prefers lazy.
+Next: **M4** — the multi-connection scheduler (cache + M2's settled
+stream engine, AIMD depth, hedged tails, fallback, 20→50→110
+connection ramp with etiquette review at each step).
+
 **Phase 1 M2 done (same day): first fully-settled DIRECT storer
 stream on mainnet.** Run 6 against stranger storer `1e9d7cc9…`:
 **200/200 chunks, 0 errors, p50 59 ms / p95 81 ms, 17 SWAP cheques
