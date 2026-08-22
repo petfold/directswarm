@@ -36,6 +36,19 @@ sweep, plus chequebook headroom). Suggest topping the wallet to
 |---|---|
 | batch 47265a62 top-up, +4 days TTL | 1.118 xBZZ |
 
+**M3 addendum — full-coverage crawl (user-blessed 240 dials,
+2026-08-22):** two further runs (128 + 107 dials, both wall-capped at
+their politeness limits, every dial accepted) bring the **grand-union
+topology cache to 2,734 storers (296 dialed+verified, 314/315 dials
+accepted = 99.7% reachability at n=315) covering 511/512 payload
+neighborhoods = 99.81% of the 1 GiB chunk set**. Merged canonical
+cache: `.phase1/topology.csv` (M4's input). The one uncovered
+neighborhood (~500 chunks, 0.19%) is forwarding-fallback territory —
+or a lazy targeted lookup at fetch time. Etiquette ledger: dial
+blessings used — 80 under the Phase-0 grant (2×40), 235 under the new
+240-dial grant (user, 2026-08-22); ≤2 dials/s, one attempt per peer,
+no retries, polite disconnects throughout; spend 0.
+
 **Phase 1 M3 done (same day): topology cache + polite crawler,
 measured.** `directswarm crawl` — bounded snowball: seed dials (from
 Phase-0 reach.csv), BZZ handshake with RTT recorded, ~4 s gossip
