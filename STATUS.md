@@ -1,5 +1,36 @@
 # directswarm — STATUS
 
+## 2026-08-24 — PREPAYMENT measured (user's idea): one up-front cheque
+## DOUBLES the single-connection rate; protocol-valid in stock bee
+
+User proposed prepaying a larger cheque per storer instead of
+pay-as-you-go. Verified in bee source: over-payment parks in a
+PERSISTED per-peer surplus and the debit path consumes surplus BEFORE
+the balance — prepaid serving never engages the threshold/validation
+throttle. Measured (pilot storer, pipeline 16): control 20.7 chunks/s
+(0.085 MB/s) vs prepaid **41.5 chunks/s (0.17–0.21 MB/s)**, 0 errors,
+clean settle-out, peer-confirmed zero debt. `probe-growth
+--prepay-chunks N` added.
+
+Disclosed en route: the first two prepay probes stalled at exactly 15
+chunks — OUR bug (the prepay patch to the admission gate silently
+no-opped against refactored code, so exposure stayed capped at 1.05T
+without the prepaid credit); bee behaved correctly throughout. Also
+added a 10 s fetch timeout (stalled pipeline slots must fail loudly).
+
+**Model revision:** the announced threshold RESETS to 1.35M on each
+reconnect; what persists (while the storer's bee runs) is our
+cumulative settled volume, which makes regrowth fast — one +450k
+upgrade per settlement event, not per 45M units. peerstate's
+`threshold_last` is a regrowth-speed indicator, not a standing value.
+Prepay sidesteps the whole mechanism and is the M6 centerpiece
+(scheduler integration: per-storer bucket-sized prepay + top-ups,
+residue parked as surplus is reusable on the SAME storers next fetch).
+
+| spend item (this entry) | amount |
+|---|---|
+| prepay probes (4 runs incl. controls) | 0.0355 xBZZ |
+
 ## 2026-08-23 (late night) — improvement VERIFIED end-to-end: full
 ## byte-verified GiB in 10m14s = 1.76 MB/s (1.9× the battery best)
 
