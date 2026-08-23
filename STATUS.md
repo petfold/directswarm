@@ -1,5 +1,34 @@
 # directswarm — STATUS
 
+## 2026-08-24 (M6.3 cont.) — swarmscan cross-check + underlay merge:
+## every neighborhood now dialable-staked (fallback no longer
+## structurally required); clean run 13 = 7m59s byte-exact
+
+User pointed at swarmscan.io: its census (3,917 tracked nodes)
+corroborates our on-chain count (4,409 ever-staked). Better, its API
+serves UNDERLAYS: pulled all 3,902 tracked nodes (paginated, polite),
+1,352 of them staked with public ip4/tcp addresses → merged with the
+stake registry + our cache into `.phase1/topology-staked.csv`:
+**1,544 dialable entries (+376 new), dialable-staked per bucket
+min 1 / median 3 / max 4, ZERO empty buckets** — including M3's
+"uncovered" neighborhood. The forwarding fallback is now optional
+(stragglers only), not structural. IPv6 works on this box but adds no
+peers (all reachable staked nodes have ip4). The 3,057 staked overlays
+still unreachable are invisible to swarmscan too (NAT/churn) — the
+underlay-discovery crawl is DEMOTED to low priority (low expected
+yield); external-dependency caveat on swarmscan stands (measurement
+aid, not product path — the product learns rosters from chain + hive).
+
+**Run 13 (enriched roster, RED=3, prepay):** 479 s fetch = 2.257 MB/s,
+byte-exact SHA-256, bee healthy throughout — the first CLEAN wall on
+par with run 11, while paying first-contact exploration for 376 new
+peers (their bandwidth EWMAs now persisted for future runs). Spend
+0.5861 xBZZ.
+
+| spend item (this entry) | amount |
+|---|---|
+| run 13 cheques | 0.5861 xBZZ |
+
 ## 2026-08-24 (M6.3) — STAKE-REGISTRY CENSUS: 4,409 staked storers on
 ## mainnet, median 8 per depth-9 neighborhood, ZERO empty neighborhoods
 ## — we only knew 22% of them
