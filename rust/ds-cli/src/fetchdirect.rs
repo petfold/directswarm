@@ -8,6 +8,7 @@ use ds_core::{NodeRecord, SwarmAddress, TopologyCache};
 use std::path::PathBuf;
 
 #[derive(Args)]
+#[allow(clippy::struct_excessive_bools)] // clap flags, not state
 pub struct FetchDirectArgs {
     /// 64-hex bytes root of the payload (for reassembly/verify).
     #[arg(long)]
@@ -49,6 +50,10 @@ pub struct FetchDirectArgs {
     /// work-stealing within the shared bucket.
     #[arg(long, default_value_t = 1)]
     pub redundancy: usize,
+    /// Wind down gracefully (sweep + exit, leftovers to fallback) when
+    /// the direct plane trickles below 40 chunks/20 s.
+    #[arg(long, default_value_t = false)]
+    pub stall_exit: bool,
     /// Measurement mode: drop chunks no connection covers instead of
     /// using the bee fallback, so reported throughput is the direct
     /// plane's alone.
@@ -211,6 +216,7 @@ pub async fn run(args: FetchDirectArgs) -> i32 {
         measure_lambda: args.measure_lambda,
         redundancy: args.redundancy,
         direct_only: args.direct_only,
+        stall_exit: args.stall_exit,
     };
 
     let report = match ds_net::schedule::fetch_scheduled(&identity, &cache, chunks, &opts).await {

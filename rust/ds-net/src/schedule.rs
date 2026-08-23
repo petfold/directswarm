@@ -117,6 +117,12 @@ pub struct ScheduleOptions {
     /// sending them to the bee fallback, so the reported throughput is
     /// the direct plane's alone.
     pub direct_only: bool,
+    /// Wind the run down when the direct plane trickles: if fewer than
+    /// 40 chunks landed in the last 20 s (after a 60 s grace), actors
+    /// sweep + exit gracefully and the leftovers go to the fallback /
+    /// next pass. Kills the slow-validator tail without stranding debt
+    /// (unlike an external timeout kill).
+    pub stall_exit: bool,
 }
 
 #[derive(Debug, Default)]
@@ -345,6 +351,7 @@ pub async fn fetch_scheduled(
     });
 
     // One actor per storer, all in parallel, each with its own swarm.
+    let wind_down = Arc::new(AtomicBool::new(false));
     let started = Instant::now();
     let mut actors = Vec::new();
     for storer in selected {
@@ -366,6 +373,7 @@ pub async fn fetch_scheduled(
             fallback: fb_tx.clone(),
             peerstate: peerstate.clone(),
             measure_lambda: opts.measure_lambda,
+            wind_down: wind_down.clone(),
             direct_bytes: direct_bytes.clone(),
             direct_ok: direct_ok.clone(),
             cheques: cheques.clone(),
@@ -378,23 +386,37 @@ pub async fn fetch_scheduled(
     }
 
     // Progress sampler: one INFO line per 10 s so the log yields a
-    // completion curve (time-to-90% is the straggler-honest metric).
+    // completion curve (time-to-90% is the straggler-honest metric),
+    // plus the stall detector driving the graceful wind-down.
     let sampler_stop = Arc::new(AtomicBool::new(false));
     {
         let stop = sampler_stop.clone();
         let ok = direct_ok.clone();
         let bytes = direct_bytes.clone();
         let t0 = started;
+        let wind = wind_down.clone();
+        let stall_exit = opts.stall_exit;
         tokio::spawn(async move {
+            let mut prev = [0u64; 2];
             while !stop.load(Ordering::Relaxed) {
                 tokio::time::sleep(Duration::from_secs(10)).await;
+                let now = ok.load(Ordering::Relaxed);
                 tracing::info!(
                     target: "m5progress",
                     t_s = t0.elapsed().as_secs(),
-                    chunks = ok.load(Ordering::Relaxed),
+                    chunks = now,
                     bytes = bytes.load(Ordering::Relaxed),
                     "progress"
                 );
+                if stall_exit
+                    && t0.elapsed() >= Duration::from_secs(60)
+                    && now.saturating_sub(prev[0]) < 40
+                    && !wind.swap(true, Ordering::Relaxed)
+                {
+                    tracing::info!("direct plane trickling (<40 chunks/20s) — winding down");
+                }
+                prev[0] = prev[1];
+                prev[1] = now;
             }
         });
     }
@@ -516,6 +538,13 @@ fn select_storers(
                 break;
             }
             if let Some(c) = per_bucket.get(p).and_then(|v| v.get(round)) {
+                // A measured-slow validator may carry a bucket alone
+                // (round 0) but never burns a redundancy slot: its
+                // pacing would anchor the bucket's tail instead of
+                // hedging it.
+                if round > 0 && c.0 == 2 {
+                    continue;
+                }
                 out.push(Selected {
                     underlay: c.3.clone(),
                     overlay: c.4,
@@ -589,6 +618,8 @@ struct ConnArgs {
     fallback: mpsc::UnboundedSender<[u8; 32]>,
     peerstate: Arc<PeerStateStore>,
     measure_lambda: bool,
+    /// Set by the stall detector: stop admitting, sweep, exit.
+    wind_down: Arc<AtomicBool>,
     direct_bytes: Arc<AtomicU64>,
     direct_ok: Arc<AtomicU64>,
     cheques: Arc<AtomicU64>,
@@ -954,14 +985,15 @@ async fn drive(ctx: &mut ConnCtx<'_>, pacer: &mut Pacer) -> u64 {
                 tracing::info!(peer=%ctx.peer_id, "spend cap near: fetching stopped, sweeping");
             }
         }
-        if spend_stop {
+        let halted = spend_stop || ctx.a.wind_down.load(Ordering::Relaxed);
+        if halted {
             if let Some(addr) = pending.take() {
                 let _ = ctx.a.fallback.send(addr);
             }
         }
 
         // Admit new fetches.
-        while !finishing && !spend_stop && tasks.len() < ctx.a.pipeline {
+        while !finishing && !halted && tasks.len() < ctx.a.pipeline {
             let popped = pending.take().or_else(|| ctx.a.pool.pop(ctx.a.storer.prefix));
             let Some(addr) = popped else {
                 // Buckets only ever drain; emptiness is final.
@@ -1009,7 +1041,7 @@ async fn drive(ctx: &mut ConnCtx<'_>, pacer: &mut Pacer) -> u64 {
         let cheque_due = pacer
             .last_cheque
             .is_none_or(|at| at.elapsed() >= CHEQUE_MIN_INTERVAL);
-        let want = if finishing || spend_stop {
+        let want = if finishing || halted {
             debt > 0 && cheque_due
         } else {
             debt >= t / 5 && cheque_due
@@ -1030,11 +1062,7 @@ async fn drive(ctx: &mut ConnCtx<'_>, pacer: &mut Pacer) -> u64 {
         }
 
         // Phase transitions.
-        if !finishing
-            && pending.is_none()
-            && tasks.is_empty()
-            && (bucket_drained || spend_stop)
-        {
+        if !finishing && pending.is_none() && tasks.is_empty() && (bucket_drained || halted) {
             finishing = true;
         }
         if finishing && tasks.is_empty() {

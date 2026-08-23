@@ -1,5 +1,43 @@
 # directswarm — STATUS
 
+## 2026-08-23 (late night) — improvement VERIFIED end-to-end: full
+## byte-verified GiB in 10m14s = 1.76 MB/s (1.9× the battery best)
+
+Two follow-up fixes on top of the ledger repair, then two comparison
+runs (same driver, same payload, cold local store, byte-exact SHA-256
+verify BOTH):
+- selection never spends a redundancy slot on a measured-slow
+  validator (it may still carry a bucket alone);
+- graceful stall wind-down (direct plane <40 chunks/20 s → actors
+  sweep + exit, leftovers to the next pass/fallback) — kills the
+  slow-λ tail without stranding debt.
+
+| config (full 1 GiB, 110 conns) | fetch wall | end-to-end |
+|---|---|---|
+| battery best (run 4, pre-fix, red 2) | 18m59s | 0.949 MB/s |
+| run 6: ledger fix + tail fixes, red 2 | 17m40s | 1.019 MB/s |
+| run 7: same, redundancy 1 (110 buckets/wave) | **10m14s** | **1.761 MB/s** |
+
+In-pass flow after the ledger fix: 1.4–1.7 MB/s sustained, ~3.9 MB/s
+peak (A/B). Run 6 showed the residual limiter is WAVE GEOMETRY (each
+of ~10 waves has a setup floor), so run 7 halved the wave count —
+redundancy 1 is now safe because slow-λ storers are known and the
+stall wind-down bounds their tails. End-to-end vs stock bee
+(weightstation: 1.10–1.36 MB/s cold): **1.3–1.6× faster at 1 GiB**,
+flow rate ~3× — the first configuration that beats the forwarding
+plane end-to-end. Next levers (unchanged): grown-threshold regime
+end-to-end, larger payloads (geometry), >110 concurrency (etiquette
+review needed).
+
+| spend item (this entry) | amount |
+|---|---|
+| run 6 cheques | 0.4688 xBZZ |
+| run 7 cheques | 0.4355 xBZZ |
+
+Ledger lifetime 3.371 xBZZ; issuable ~4.0 → headroom ~0.63 (next
+measured GiB run needs a chequebook top-up or user call). Batch
+47265a62 TTL ~6.0 days.
+
 ## 2026-08-23 (night) — post-battery diagnosis (user: "that is a
 ## failure — diagnose"): THE AGGREGATE CEILING WAS OUR OWN LEDGER'S
 ## FSYNC — fixed and A/B-measured (flow 1.36 → 3.9 MB/s)
