@@ -1,5 +1,38 @@
 # directswarm — STATUS
 
+## 2026-08-24 (M6.3) — STAKE-REGISTRY CENSUS: 4,409 staked storers on
+## mainnet, median 8 per depth-9 neighborhood, ZERO empty neighborhoods
+## — we only knew 22% of them
+
+Swept the mainnet staking contract's StakeUpdated events
+(`0xda2a16EE…518F4`, public Gnosis RPC, ~0.35 s/call politeness, zero
+Swarm-network load; `tools/stake-sweep.py` →
+`.phase1/stake-registry.csv`). Findings:
+- **4,409 staked overlays**, all with active stake; per depth-9 bucket
+  min 3 / median 8 / max 21; **no bucket is empty** — even M3's
+  "uncovered" neighborhood has ≥3 staked members whose underlays we
+  simply never learned.
+- Our topology cache knows underlays for only **976 of them (22%)**;
+  3,433 staked storers (median 7 per bucket) are undialable until we
+  learn their underlays. 1,758 cache entries are NOT staked (gossip
+  ghosts / light nodes) — dial-failure fodder to deprioritize.
+- Only 369 staked peers have measured bandwidth so far.
+
+Implication: per-bucket member-parallelism is currently starved at ~2
+known members while the network offers a true median of 8 — the
+capacity ceiling we measured (best-110 ≈ 10.4 MB/s) is a floor of
+what fuller rosters allow. **Next needs a user etiquette blessing: a
+targeted underlay-discovery crawl** (hive gossip snowball focused on
+the 3,433 unknown staked overlays; dials + gossip only, no
+settlement; M3-style caps — propose ≤600 dials at ≤2/s across a few
+sessions).
+
+Also this entry: 15 stale watcher shells cleaned (self-matching pgrep
+loops — harness hygiene); line speed measured: **~83 MB/s down
+(664 Mbps), ~34 MB/s up (270 Mbps)** — peak Swarm flow uses ~7% of
+downlink; run-12 harness now refuses to hash partial reassemblies.
+Spend this entry: 0 (RPC reads only).
+
 ## 2026-08-24 (M6.4) — bandwidth-ranked LPT scheduling + a bee outage:
 ## 98.7% of the GiB in ONE rolling invocation; Nook bee died mid-run
 ## and was restarted (authorized); run 12 byte-exact after tail drain
