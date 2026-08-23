@@ -508,14 +508,29 @@ struct Selected {
     prefix: u64,
 }
 
-/// Candidate tuple: (λ class, inverted threshold, RTT, underlay,
-/// overlay) — ordered so a plain tuple sort ranks best first.
-type Candidate = (u8, u64, u32, Multiaddr, [u8; 32]);
+/// Candidate tuple: (inverted effective bandwidth, λ class, inverted
+/// threshold, RTT, underlay, overlay) — ordered so a plain tuple sort
+/// ranks best first. Effective bandwidth is the measured service-rate
+/// EWMA; an unmeasured peer is assumed MEDIAN (14 chunks/s) so
+/// exploration interleaves with exploitation instead of starving.
+type Candidate = (u64, u8, u64, u32, Multiaddr, [u8; 32]);
 
-/// Rank storers per bucket by (λ class, last-known threshold desc,
-/// RTT asc); produce the ROLLING TARGET QUEUE: every bucket's best
-/// member (largest buckets first), then redundancy rounds. The
-/// concurrency window is applied by the caller, not here.
+/// Assumed rate (tenths of chunks/s) for never-measured peers.
+const ASSUMED_CPS_X10: u64 = 140;
+/// Per-bucket parallelism targets this drain time; a bucket whose best
+/// member can't make it alone gets more members up front (capped by
+/// `redundancy`). Classic longest-processing-time-first: the queue is
+/// ordered by expected drain time DESCENDING so slow buckets start
+/// early and finish inside the bulk instead of after it — slot
+/// PRODUCTIVITY instead of a wider window (the user's point: a slow
+/// node isn't bad, it just occupies a slot a faster one could use).
+const BUCKET_TARGET_MS: u64 = 45_000;
+
+/// Produce the ROLLING TARGET QUEUE: for every bucket, enough of its
+/// best-bandwidth members (up to `redundancy`) to drain it in
+/// ~[`BUCKET_TARGET_MS`], groups ordered longest-drain-first; unused
+/// members appended as late hedges. The concurrency window is applied
+/// by the caller, not here.
 fn select_storers(
     cache: &TopologyCache,
     needed: &[[u8; 32]],
@@ -544,45 +559,62 @@ fn select_storers(
             None => 1,
             Some(_) => 2,
         };
+        let eff_rate = if ps.service_cps_x10 > 0 {
+            u64::from(ps.service_cps_x10)
+        } else {
+            ASSUMED_CPS_X10
+        };
         per_bucket.entry(p).or_default().push((
+            u64::MAX - eff_rate, // ascending sort ⇒ higher bandwidth first
             class,
-            u64::MAX - ps.threshold_last, // ascending sort ⇒ higher T first
+            u64::MAX - ps.threshold_last,
             rec.rtt_ms.unwrap_or(u32::MAX),
             underlay,
             rec.overlay,
         ));
     }
     for v in per_bucket.values_mut() {
-        v.sort_by_key(|c| (c.0, c.1, c.2));
+        v.sort_by_key(|c| (c.0, c.1, c.2, c.3));
     }
-    // Buckets by needed-chunk count, biggest first.
-    let mut order: Vec<u64> = per_bucket.keys().copied().collect();
-    order.sort_by_key(|p| std::cmp::Reverse(bucket_count.get(p).copied().unwrap_or(0)));
-
-    let mut out = Vec::new();
-    for round in 0..redundancy.max(1) {
-        let mut any = false;
-        for p in &order {
-            if let Some(c) = per_bucket.get(p).and_then(|v| v.get(round)) {
-                // A measured-slow validator may carry a bucket alone
-                // (round 0) but never burns a redundancy slot: its
-                // pacing would anchor the bucket's tail instead of
-                // hedging it.
-                if round > 0 && c.0 == 2 {
-                    continue;
-                }
-                out.push(Selected {
-                    underlay: c.3.clone(),
-                    overlay: c.4,
+    // Per bucket: take members (best first) until the projected drain
+    // time meets the target; order groups longest-drain-first (LPT).
+    let mut groups: Vec<(u64, Vec<Selected>)> = Vec::new();
+    let mut hedges: Vec<Selected> = Vec::new();
+    for (p, cands) in &per_bucket {
+        let count = bucket_count.get(p).copied().unwrap_or(0) as u64;
+        let mut members = Vec::new();
+        let mut rate_sum_x10 = 0u64;
+        let mut dur_ms = u64::MAX;
+        for c in cands {
+            let is_extra = !members.is_empty();
+            // A measured-slow validator may carry a bucket alone but
+            // never burns a parallelism slot.
+            if is_extra && c.1 == 2 {
+                continue;
+            }
+            // Once the drain target is met (or the parallelism cap is
+            // hit), remaining members become late hedges.
+            if is_extra && (dur_ms <= BUCKET_TARGET_MS || members.len() >= redundancy.max(1)) {
+                hedges.push(Selected {
+                    underlay: c.4.clone(),
+                    overlay: c.5,
                     prefix: *p,
                 });
-                any = true;
+                continue;
             }
+            rate_sum_x10 += u64::MAX - c.0;
+            members.push(Selected {
+                underlay: c.4.clone(),
+                overlay: c.5,
+                prefix: *p,
+            });
+            dur_ms = count.saturating_mul(10_000) / rate_sum_x10.max(1);
         }
-        if !any {
-            break;
-        }
+        groups.push((dur_ms, members));
     }
+    groups.sort_by_key(|(d, _)| std::cmp::Reverse(*d));
+    let mut out: Vec<Selected> = groups.into_iter().flat_map(|(_, m)| m).collect();
+    out.extend(hedges);
     out
 }
 

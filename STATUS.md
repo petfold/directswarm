@@ -1,5 +1,43 @@
 # directswarm — STATUS
 
+## 2026-08-24 (M6.4) — bandwidth-ranked LPT scheduling + a bee outage:
+## 98.7% of the GiB in ONE rolling invocation; Nook bee died mid-run
+## and was restarted (authorized); run 12 byte-exact after tail drain
+
+**Built:** selection now ranks members by measured bandwidth EWMA
+(unknown peers assumed median so exploration continues), orders the
+target queue longest-drain-first (LPT — slow buckets start early and
+finish inside the bulk), and sizes per-bucket member-parallelism to a
+45 s drain target (cap = --redundancy). The user's framing drove this:
+slow nodes aren't bad, they just occupy a slot a faster member could
+use — raise slot productivity instead of the connection window.
+
+**Run 12 (RED=3):** pass 1 = ONE rolling invocation, 260,676 chunks
+(98.7%) direct, 1.07 GB at 2.289 MB/s including ramp. Then the LOCAL
+BEE NODE was found dead (Nook's embedded bee had exited; Nook did not
+restart it) — the fallback tail (~800 chunks incl. the known uncovered
+neighborhood) could not drain, the driver hashed a partial reassembly
+(NOT corruption — the joiner failed cleanly on the missing chunks; the
+harness now only hashes a completed verify). Bee restarted from
+Nook's own binary+config (grant, 2026-08-22; bee-claude-restart.log
+pattern), tail drained (698 chunks via forwarding), **SHA-256
+byte-exact confirmed**. Clean-wall measurement deferred to the next
+milestone run (a re-run for the number alone ≈ 0.5 xBZZ).
+
+**Resource footprint measured (user question):** no ant processes run
+on this box; bee idle ≈ negligible bandwidth, ~137 mostly-idle
+connections (and it is the REQUIRED fallback plane — keep it up; the
+risk is it dying unnoticed, so the driver should health-check it).
+During full flow: ~48 Mbps down, CPU ~15% all-cores — far from any
+local ceiling, as the user judged. Added to plan: sampler to log CPU%
++ net utilization and throttle admission if either nears its maximum.
+
+**Chequebook topped up** +2.0 xBZZ (txs `0x0d4af59b…`, `0xe753ca8e…`);
+chequebook 8.97 xBZZ. Spend this entry (run 12 + drain) ≈ 0.55 xBZZ.
+Next: M6.3 stake-registry rosters (staking contract
+`0xda2a16EE…518F4` confirmed; eth_getLogs sweep → near-exact
+neighborhood membership), then clean benchmark run 13.
+
 ## 2026-08-24 (M6 session) — prepay scheduler + rolling admission:
 ## full byte-verified GiB in 7m08s = 2.53 MB/s (3.1× battery best,
 ## ~2× stock bee end-to-end; flow bursts 5.8 MB/s)
