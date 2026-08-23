@@ -1,5 +1,39 @@
 # directswarm — STATUS
 
+## 2026-08-25 — 256-window ramp: flow peaked 16.9 MB/s (135 Mbps,
+## 36% CPU) — ISP-safe so far; wall now ~65% TAIL; gap diagnosis:
+## storer cold-vs-warm 1.6× + per-conn dead start, not scheduler flow
+
+Standing grant extended by user: chequebook top-ups no longer need
+per-instance asks. Topped up +3.0 xBZZ (txs `0x619d7e9d…`,
+`0x6105e837…`) → chequebook 11.97 xBZZ.
+
+**Gap diagnosis (controlled single-peer tests):** the "3× probe vs
+scheduler" gap decomposes into (a) the probe cycling the same chunks =
+STORER-WARM vs the scheduler's distinct chunks = storer-disk-cold —
+measured 12 → 19.6 chunks/s cold→warm on the same peer (1.6×; fleet
+EWMAs are honest cold numbers, probe rates were warm-biased);
+(b) ~8–10 s per-connection dead time (dial+handshake+settle-wait+
+prepay-validation window at start, sweep+zero-confirm at end). Fixes
+landed: initial prepay emitted AT HANDSHAKE so its validation window
+overlaps setup; settle-wait now event-driven (threshold announcement)
+instead of a fixed 2 s. Depth ruled out again at the fleet median.
+
+**Run 15 (window 256, RED 2, prepay, enriched roster):** 428 s fetch,
+byte-exact, spend 0.6082 xBZZ. Resource monitor (user requirement):
+peak net 16.9 MB/s ≈ 135 Mbps of the 664 Mbps line, CPU peak 36%
+all-cores — no ISP/NAT symptoms at ~400 total connections (incl.
+bee's ~137; bee kept running: negligible idle footprint, needed for
+the final drain). **Wall is now tail-dominated (~65%)**: bulk lands in
+~2 min at >10 MB/s flow, then slow-bucket stragglers + mop-up passes.
+Next levers: tail policy (dynamic member-add when slots idle, no
+mop-up reinvocations), then daemon-warm connections.
+
+| spend item (this entry) | amount |
+|---|---|
+| gap-diagnosis probes + controlled tests | ~0.05 xBZZ |
+| run 15 cheques | 0.6082 xBZZ |
+
 ## 2026-08-24 (late) — the 10× question: depth is NOT the lever
 ## (measured), the scheduler-vs-probe efficiency gap IS (~3×), and the
 ## 10× is a multiplicative stack, not a silver bullet
