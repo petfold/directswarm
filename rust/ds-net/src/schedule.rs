@@ -84,6 +84,7 @@ const LAMBDA_PROBE_TIMEOUT: Duration = Duration::from_secs(25);
 const DEFAULT_RATE: u64 = 100_000;
 
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)] // independent feature switches
 pub struct ScheduleOptions {
     pub network_id: u64,
     pub chain_id: u64,
@@ -117,6 +118,13 @@ pub struct ScheduleOptions {
     /// sending them to the bee fallback, so the reported throughput is
     /// the direct plane's alone.
     pub direct_only: bool,
+    /// Prepay-first settlement: one up-front cheque per storer sized to
+    /// a slice of its assigned bucket, topped up at a low-water mark,
+    /// converging to the exact consumed amount (bee parks over-payment
+    /// as persisted surplus and serves against it without engaging the
+    /// threshold/validation throttle — measured 2× per connection, and
+    /// it removes per-cheque pacing entirely).
+    pub prepay: bool,
     /// Wind the run down when the direct plane trickles: if fewer than
     /// 40 chunks landed in the last 20 s (after a 60 s grace), actors
     /// sweep + exit gracefully and the leftovers go to the fallback /
@@ -140,6 +148,10 @@ pub struct ScheduleReport {
     pub cheque_plur: u128,
     pub refresh_units: u64,
     pub residual_debt_units: u64,
+    /// Units prepaid but unconsumed at close — parked as surplus at the
+    /// peers (persisted by their bee; spendable on our next fetch from
+    /// them, but illiquid).
+    pub surplus_parked_units: u64,
     /// Connections whose end-of-run zero-debt was confirmed by the
     /// PEER (pseudosettle probe ACK == 0).
     pub zero_confirmed_conns: u64,
@@ -205,6 +217,14 @@ impl WorkPool {
         self.buckets.lock().ok()?.get_mut(&prefix)?.pop()
     }
 
+    fn remaining(&self, prefix: u64) -> usize {
+        self.buckets
+            .lock()
+            .ok()
+            .and_then(|b| b.get(&prefix).map(Vec::len))
+            .unwrap_or(0)
+    }
+
     fn drain_all(&self) -> Vec<[u8; 32]> {
         let Ok(mut b) = self.buckets.lock() else {
             return Vec::new();
@@ -258,14 +278,7 @@ pub async fn fetch_scheduled(
 
     // Select storers per bucket: breadth first (one per non-empty
     // bucket, largest buckets first), then redundancy rounds.
-    let selected = select_storers(
-        cache,
-        &needed,
-        opts.depth,
-        opts.connections,
-        opts.redundancy.max(1),
-        &peerstate,
-    );
+    let selected = select_storers(cache, &needed, opts.depth, opts.redundancy.max(1), &peerstate);
     if selected.is_empty() && opts.direct_only {
         return Err(anyhow!("no storer in the cache covers any needed chunk"));
     }
@@ -299,6 +312,7 @@ pub async fn fetch_scheduled(
     let opened = Arc::new(AtomicU64::new(0));
     let zero_confirmed = Arc::new(AtomicU64::new(0));
     let lambdas_measured = Arc::new(AtomicU64::new(0));
+    let surplus_parked = Arc::new(AtomicU64::new(0));
 
     // Fallback worker (bee forwarding) drains uncovered + failed chunks.
     let fallback = BeeApiFetcher::new(&opts.bee_url)?;
@@ -350,12 +364,18 @@ pub async fn fetch_scheduled(
         fails
     });
 
-    // One actor per storer, all in parallel, each with its own swarm.
+    // ROLLING ADMISSION: a fixed window of concurrent connections fed
+    // from the target queue — when a connection finishes its bucket,
+    // the next uncovered bucket's storer is dialed immediately. No
+    // wave barriers: fast connections never idle behind slow ones
+    // (the pass structure cost runs 8/9 ~200 s of setup + idle).
     let wind_down = Arc::new(AtomicBool::new(false));
     let started = Instant::now();
-    let mut actors = Vec::new();
-    for storer in selected {
-        actors.push(tokio::spawn(run_connection(ConnArgs {
+    let window = opts.connections.max(1);
+    let mut targets = selected.into_iter();
+    let mut covered_once: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    let mut inflight: tokio::task::JoinSet<u64> = tokio::task::JoinSet::new();
+    let make_args = |storer: Selected| ConnArgs {
             id_secret: id.secret,
             id_nonce: id.nonce,
             keypair: id.keypair.clone(),
@@ -373,6 +393,8 @@ pub async fn fetch_scheduled(
             fallback: fb_tx.clone(),
             peerstate: peerstate.clone(),
             measure_lambda: opts.measure_lambda,
+            prepay: opts.prepay,
+            surplus_parked: surplus_parked.clone(),
             wind_down: wind_down.clone(),
             direct_bytes: direct_bytes.clone(),
             direct_ok: direct_ok.clone(),
@@ -382,8 +404,7 @@ pub async fn fetch_scheduled(
             opened: opened.clone(),
             zero_confirmed: zero_confirmed.clone(),
             lambdas_measured: lambdas_measured.clone(),
-        })));
-    }
+    };
 
     // Progress sampler: one INFO line per 10 s so the log yields a
     // completion curve (time-to-90% is the straggler-honest metric),
@@ -409,8 +430,8 @@ pub async fn fetch_scheduled(
                     "progress"
                 );
                 if stall_exit
-                    && t0.elapsed() >= Duration::from_secs(60)
-                    && now.saturating_sub(prev[0]) < 40
+                    && t0.elapsed() >= Duration::from_secs(90)
+                    && now.saturating_sub(prev[0]) < 20
                     && !wind.swap(true, Ordering::Relaxed)
                 {
                     tracing::info!("direct plane trickling (<40 chunks/20s) — winding down");
@@ -422,10 +443,22 @@ pub async fn fetch_scheduled(
     }
 
     let mut residual = 0u64;
-    for a in actors {
-        if let Ok(r) = a.await {
-            residual += r;
+    loop {
+        // Refill the window (unless winding down). Skip a redundancy
+        // target whose bucket is nearly drained by its first member —
+        // a dial+handshake for <30 chunks is pure overhead.
+        while inflight.len() < window && !wind_down.load(Ordering::Relaxed) {
+            let Some(t) = targets.next() else { break };
+            if covered_once.contains(&t.prefix) && pool.remaining(t.prefix) < 30 {
+                continue;
+            }
+            covered_once.insert(t.prefix);
+            inflight.spawn(run_connection(make_args(t)));
         }
+        let Some(joined) = inflight.join_next().await else {
+            break;
+        };
+        residual += joined.unwrap_or(0);
     }
     sampler_stop.store(true, Ordering::Relaxed);
     // Chunks stranded in buckets whose every covering connection died.
@@ -456,6 +489,7 @@ pub async fn fetch_scheduled(
     report.refresh_units = refresh_units.load(Ordering::Relaxed);
     report.residual_debt_units = residual;
     report.zero_confirmed_conns = zero_confirmed.load(Ordering::Relaxed);
+    report.surplus_parked_units = surplus_parked.load(Ordering::Relaxed);
     report.lambdas_measured = lambdas_measured.load(Ordering::Relaxed);
     report.chunks_failed = (needed.len() as u64)
         .saturating_sub(report.chunks_from_direct + report.chunks_from_fallback)
@@ -479,13 +513,13 @@ struct Selected {
 type Candidate = (u8, u64, u32, Multiaddr, [u8; 32]);
 
 /// Rank storers per bucket by (λ class, last-known threshold desc,
-/// RTT asc); allocate breadth-first across buckets (largest chunk
-/// count first), then redundancy rounds until `connections` actors.
+/// RTT asc); produce the ROLLING TARGET QUEUE: every bucket's best
+/// member (largest buckets first), then redundancy rounds. The
+/// concurrency window is applied by the caller, not here.
 fn select_storers(
     cache: &TopologyCache,
     needed: &[[u8; 32]],
     depth: u8,
-    connections: usize,
     redundancy: usize,
     peerstate: &PeerStateStore,
 ) -> Vec<Selected> {
@@ -521,22 +555,14 @@ fn select_storers(
     for v in per_bucket.values_mut() {
         v.sort_by_key(|c| (c.0, c.1, c.2));
     }
-    // Buckets by needed-chunk count, biggest first; with redundancy R,
-    // cover connections/R buckets with up to R storers each.
+    // Buckets by needed-chunk count, biggest first.
     let mut order: Vec<u64> = per_bucket.keys().copied().collect();
     order.sort_by_key(|p| std::cmp::Reverse(bucket_count.get(p).copied().unwrap_or(0)));
-    if redundancy > 1 {
-        order.truncate(connections.div_ceil(redundancy).max(1));
-    }
 
     let mut out = Vec::new();
-    let mut round = 0usize;
-    while out.len() < connections {
+    for round in 0..redundancy.max(1) {
         let mut any = false;
         for p in &order {
-            if out.len() >= connections {
-                break;
-            }
             if let Some(c) = per_bucket.get(p).and_then(|v| v.get(round)) {
                 // A measured-slow validator may carry a bucket alone
                 // (round 0) but never burns a redundancy slot: its
@@ -556,7 +582,6 @@ fn select_storers(
         if !any {
             break;
         }
-        round += 1;
     }
     out
 }
@@ -618,6 +643,8 @@ struct ConnArgs {
     fallback: mpsc::UnboundedSender<[u8; 32]>,
     peerstate: Arc<PeerStateStore>,
     measure_lambda: bool,
+    prepay: bool,
+    surplus_parked: Arc<AtomicU64>,
     /// Set by the stall detector: stop admitting, sweep, exit.
     wind_down: Arc<AtomicBool>,
     direct_bytes: Arc<AtomicU64>,
@@ -642,6 +669,11 @@ struct Pacer {
     rate: u64,
     /// Units settled on this connection (cheques + refreshes).
     settled_units: u64,
+    /// Units prepaid (bee-side surplus). Mirror debt counts consumption;
+    /// bee's view of our debt is mirror debt MINUS this.
+    prepaid: u64,
+    /// Rolling estimate of this bucket's per-chunk price.
+    avg_price: u64,
     last_refresh: Option<Instant>,
     last_cheque: Option<Instant>,
 }
@@ -673,11 +705,13 @@ impl Pacer {
     }
 
     /// Exposure gate for one more reservation of `price` units:
-    /// mirror debt + reserved + unvalidated + price ≤ 1.05 × T.
+    /// mirror debt + reserved + unvalidated + price ≤ prepaid + 1.05 × T.
+    /// A just-emitted prepay sits in the unvalidated window, cancelling
+    /// its own credit until the peer has had time to validate it.
     fn admit(&mut self, price: u64) -> bool {
         let t = self.threshold();
         let unval = self.unvalidated_sum();
-        let limit = (t.saturating_mul(105) / 100).saturating_sub(unval);
+        let limit = (self.prepaid + t.saturating_mul(105) / 100).saturating_sub(unval);
         self.mirror.try_reserve(price, limit)
     }
 }
@@ -780,6 +814,14 @@ async fn run_connection(a: ConnArgs) -> u64 {
         unvalidated: VecDeque::new(),
         rate: DEFAULT_RATE,
         settled_units: 0,
+        // Resume any surplus this peer already holds for us (bee
+        // persists it): spendable immediately, no re-prepay.
+        prepaid: if a.prepay {
+            known.map_or(0, |k| k.surplus_units)
+        } else {
+            0
+        },
+        avg_price: 230_000,
         last_refresh: None,
         last_cheque: None,
     };
@@ -794,7 +836,7 @@ async fn run_connection(a: ConnArgs) -> u64 {
 
     // First contact with an unknown peer: measure λ once, persist it.
     let mut measured_lambda: Option<u64> = None;
-    if known.and_then(|k| k.lambda_ms).is_none() && a.measure_lambda {
+    if known.and_then(|k| k.lambda_ms).is_none() && a.measure_lambda && !a.prepay {
         if let Some(l) = measure_lambda(&mut ctx, &mut pacer).await {
             pacer.lambda_ms = l;
             measured_lambda = Some(l);
@@ -804,7 +846,21 @@ async fn run_connection(a: ConnArgs) -> u64 {
     }
 
     // Main fetch + settle loop.
+    let conn_ok_before = a.direct_ok.load(Ordering::Relaxed);
+    let flow_started = Instant::now();
     let residual = drive(&mut ctx, &mut pacer).await;
+    let flow_secs = flow_started.elapsed().as_secs_f64();
+    // direct_ok is global; per-conn counting via the local task counter
+    // would race with siblings, so sample from the mirror instead:
+    // consumed units / avg price ≈ chunks served by THIS connection.
+    let (consumed_units, _) = pacer.mirror.snapshot();
+    let _ = conn_ok_before;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+    let rate_cps_x10 = if flow_secs >= 5.0 && consumed_units >= pacer.avg_price * 50 {
+        Some(((consumed_units as f64 / f64::from(u32::try_from(pacer.avg_price).unwrap_or(230_000))) / flow_secs * 10.0) as u32)
+    } else {
+        None
+    };
 
     // Bee-side zero confirmation (only meaningful on a live conn).
     let mut confirmed = false;
@@ -816,12 +872,21 @@ async fn run_connection(a: ConnArgs) -> u64 {
             a.zero_confirmed.fetch_add(1, Ordering::Relaxed);
         }
     }
+    let (debt_end, _) = pacer.mirror.snapshot();
+    let parked = pacer.prepaid.saturating_sub(debt_end);
+    if a.prepay {
+        a.surplus_parked.fetch_add(parked, Ordering::Relaxed);
+    }
     a.peerstate.record(
         &info.remote_overlay,
-        pacer.threshold(),
-        measured_lambda,
-        pacer.settled_units,
-        residual == 0 && confirmed,
+        &crate::peerstate::PeerObservation {
+            threshold: pacer.threshold(),
+            lambda_ms: measured_lambda,
+            settled_units_delta: pacer.settled_units,
+            service_cps_x10: rate_cps_x10,
+            surplus_units_abs: a.prepay.then_some(parked),
+            clean_close: residual == 0 && confirmed,
+        },
     );
     let _ = bye_tx.send(());
     residual
@@ -834,6 +899,36 @@ struct ConnCtx<'a> {
     beneficiary: [u8; 20],
     a: &'a ConnArgs,
     alive: Arc<AtomicBool>,
+}
+
+/// Emit one PREPAY/top-up cheque for `units`: bee parks it as surplus.
+/// No mirror credit — consumption shows as mirror debt against
+/// `pacer.prepaid`.
+async fn emit_prepay(ctx: &mut ConnCtx<'_>, pacer: &mut Pacer, units: u64) -> Result<()> {
+    let outcome = emit_settlement_cheque(ChequeEmit {
+        control: &mut ctx.control,
+        peer_id: ctx.peer_id,
+        secret: &ctx.a.id_secret,
+        chequebook: ctx.a.chequebook,
+        beneficiary: ctx.beneficiary,
+        chain_id: ctx.a.chain_id,
+        debt_units: units,
+        ledger: &ctx.a.ledger,
+        issuable: ctx.a.issuable,
+        issued_plur: &ctx.a.issued_plur,
+        max_issue_plur: ctx.a.max_issue_plur,
+    })
+    .await?;
+    pacer.prepaid += units;
+    pacer.settled_units += units;
+    pacer.unvalidated.push_back((Instant::now(), units));
+    pacer.last_cheque = Some(Instant::now());
+    pacer.rate = u64::try_from(outcome.rate).unwrap_or(DEFAULT_RATE);
+    ctx.a.cheques.fetch_add(1, Ordering::Relaxed);
+    ctx.a
+        .cheque_plur
+        .fetch_add(u64::try_from(outcome.plur).unwrap_or(u64::MAX), Ordering::Relaxed);
+    Ok(())
 }
 
 /// Emit one cheque for `units` under the global spend cap; instant
@@ -868,6 +963,7 @@ async fn emit(ctx: &mut ConnCtx<'_>, pacer: &mut Pacer, units: u64) -> Result<()
 
 async fn refresh(ctx: &mut ConnCtx<'_>, pacer: &mut Pacer) {
     let (debt, _) = pacer.mirror.snapshot();
+    let debt = debt.saturating_sub(pacer.prepaid);
     if debt > 0 {
         if let Ok(ok) = ant_p2p::pseudosettle::refresh_peer(&mut ctx.control, ctx.peer_id).await {
             if ok.accepted > 0 {
@@ -971,15 +1067,16 @@ async fn drive(ctx: &mut ConnCtx<'_>, pacer: &mut Pacer) -> u64 {
                 let _ = ctx.a.fallback.send(addr);
             }
             let (debt, _) = pacer.mirror.snapshot();
-            return debt;
+            return debt.saturating_sub(pacer.prepaid);
         }
 
         // Global spend-cap projection: stop FETCHING with sweep room
         // left (a guard that blocks the final settlement strands debt).
         if !spend_stop {
             let (debt, reserved) = pacer.mirror.snapshot();
+            let unpaid = (debt + reserved).saturating_sub(pacer.prepaid);
             let projected = u128::from(ctx.a.issued_plur.load(Ordering::SeqCst))
-                + u128::from(debt + reserved) * u128::from(pacer.rate);
+                + u128::from(unpaid) * u128::from(pacer.rate);
             if projected > u128::from(ctx.a.max_issue_plur) * 92 / 100 {
                 spend_stop = true;
                 tracing::info!(peer=%ctx.peer_id, "spend cap near: fetching stopped, sweeping");
@@ -1004,6 +1101,7 @@ async fn drive(ctx: &mut ConnCtx<'_>, pacer: &mut Pacer) -> u64 {
                 continue;
             }
             let price = Accounting::peer_price(&ctx.overlay, &addr);
+            pacer.avg_price = price.max(1);
             if !pacer.admit(price) {
                 pending = Some(addr);
                 break;
@@ -1041,22 +1139,42 @@ async fn drive(ctx: &mut ConnCtx<'_>, pacer: &mut Pacer) -> u64 {
         let cheque_due = pacer
             .last_cheque
             .is_none_or(|at| at.elapsed() >= CHEQUE_MIN_INTERVAL);
-        let want = if finishing || halted {
-            debt > 0 && cheque_due
+        if ctx.a.prepay && !finishing && !halted {
+            // Prepay/top-up toward: consumed + min(remaining work, one
+            // slice). Converges to the exact consumed amount as the
+            // bucket drains, so residue at close is ≈ 0.
+            let slice = pacer.avg_price.saturating_mul(250);
+            let remaining = (ctx.a.pool.remaining(ctx.a.storer.prefix)
+                + tasks.len()
+                + usize::from(pending.is_some())) as u64
+                * pacer.avg_price;
+            let desired = debt + remaining.min(slice);
+            if cheque_due && desired > pacer.prepaid + pacer.avg_price.saturating_mul(10) {
+                let units = desired - pacer.prepaid;
+                if let Err(err) = emit_prepay(ctx, pacer, units).await {
+                    tracing::debug!(peer=%ctx.peer_id, "prepay emit failed: {err}");
+                }
+            }
         } else {
-            debt >= t / 5 && cheque_due
-        };
-        if want {
-            if let Err(err) = emit(ctx, pacer, debt).await {
-                tracing::debug!(peer=%ctx.peer_id, "cheque emit failed: {err}");
-                if finishing {
-                    sweep_attempts += 1;
-                    if sweep_attempts >= 3 {
-                        let (residual, _) = pacer.mirror.snapshot();
-                        tracing::warn!(peer=%ctx.peer_id, residual, "final sweep failed");
-                        return residual;
+            let unpaid = debt.saturating_sub(pacer.prepaid);
+            let want = if finishing || halted {
+                unpaid > 0 && cheque_due
+            } else {
+                unpaid >= t / 5 && cheque_due
+            };
+            if want {
+                if let Err(err) = emit(ctx, pacer, unpaid).await {
+                    tracing::debug!(peer=%ctx.peer_id, "cheque emit failed: {err}");
+                    if finishing {
+                        sweep_attempts += 1;
+                        if sweep_attempts >= 3 {
+                            let (residual, _) = pacer.mirror.snapshot();
+                            let residual = residual.saturating_sub(pacer.prepaid);
+                            tracing::warn!(peer=%ctx.peer_id, residual, "final sweep failed");
+                            return residual;
+                        }
+                        tokio::time::sleep(Duration::from_secs(2)).await;
                     }
-                    tokio::time::sleep(Duration::from_secs(2)).await;
                 }
             }
         }
@@ -1067,7 +1185,7 @@ async fn drive(ctx: &mut ConnCtx<'_>, pacer: &mut Pacer) -> u64 {
         }
         if finishing && tasks.is_empty() {
             let (debt, _) = pacer.mirror.snapshot();
-            if debt == 0 {
+            if debt.saturating_sub(pacer.prepaid) == 0 {
                 return 0;
             }
         }

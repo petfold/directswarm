@@ -25,8 +25,9 @@ pub struct FetchDirectArgs {
     /// Number of concurrent storer connections.
     #[arg(long, default_value_t = 20)]
     pub connections: usize,
-    /// Per-connection pipeline depth.
-    #[arg(long, default_value_t = 16)]
+    /// Per-connection pipeline depth (measured: a storer saturates one
+    /// client connection at ~8 in flight; deeper only queues there).
+    #[arg(long, default_value_t = 8)]
     pub depth: usize,
     /// Neighborhood depth for storer↔chunk matching.
     #[arg(long, default_value_t = 9)]
@@ -54,6 +55,10 @@ pub struct FetchDirectArgs {
     /// the direct plane trickles below 40 chunks/20 s.
     #[arg(long, default_value_t = false)]
     pub stall_exit: bool,
+    /// Prepay-first settlement (one up-front cheque per storer + slice
+    /// top-ups, converging to the exact consumed amount).
+    #[arg(long, default_value_t = false)]
+    pub prepay: bool,
     /// Measurement mode: drop chunks no connection covers instead of
     /// using the bee fallback, so reported throughput is the direct
     /// plane's alone.
@@ -217,6 +222,7 @@ pub async fn run(args: FetchDirectArgs) -> i32 {
         redundancy: args.redundancy,
         direct_only: args.direct_only,
         stall_exit: args.stall_exit,
+        prepay: args.prepay,
     };
 
     let report = match ds_net::schedule::fetch_scheduled(&identity, &cache, chunks, &opts).await {
@@ -263,6 +269,13 @@ pub async fn run(args: FetchDirectArgs) -> i32 {
         "peer learning:   {} λ measured this run; {}/{} connections zero-debt CONFIRMED by peer",
         report.lambdas_measured, report.zero_confirmed_conns, report.connections_opened
     );
+    if report.surplus_parked_units > 0 {
+        println!(
+            "surplus parked:  {} units (~{:.5} xBZZ) prepaid-unconsumed, reusable at those peers",
+            report.surplus_parked_units,
+            report.surplus_parked_units as f64 * 1e5 / 1e16
+        );
+    }
     if !report.errors.is_empty() {
         eprintln!(
             "errors ({} shown of {}):",

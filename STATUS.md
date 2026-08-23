@@ -1,5 +1,66 @@
 # directswarm — STATUS
 
+## 2026-08-24 (M6 session) — prepay scheduler + rolling admission:
+## full byte-verified GiB in 7m08s = 2.53 MB/s (3.1× battery best,
+## ~2× stock bee end-to-end; flow bursts 5.8 MB/s)
+
+**Chequebook topped up** (user grant): Nook →3.0→ spike (tx
+`0x00a0d285…`) →3.0→ chequebook (tx `0x1983564b…`), 3.981 → 6.981 xBZZ.
+
+**Built (M6.1–M6.4 partial):**
+- Prepay-first settlement in the scheduler: per-storer slice prepay +
+  low-water top-ups converging to exact consumption; prepaid-aware
+  exposure gate, spend projection, final sweep; parked surplus tracked
+  ABSOLUTELY per peer in peerstate and re-used on reconnect (no
+  double-prepay). Depth default 8 (measured saturation).
+- Bandwidth learning: per-peer service-rate EWMA recorded from
+  saturated connections (905 peers already have one; median
+  14 chunks/s — confirms wide member-speed spread around the pilot's
+  48).
+- **Rolling admission**: the wave/pass structure is gone — a fixed
+  window of 110 connection slots fed from a target queue covering ALL
+  512 buckets (largest first, redundancy rounds appended; a redundancy
+  dial is skipped when its bucket is nearly drained). Fast connections
+  never idle behind slow ones.
+
+**Measured (full 1 GiB, cold local store, byte-exact SHA-256 each):**
+| run | config | wall | rate |
+|---|---|---|---|
+| 7 (M5 best) | pay-as-you-go, waves | 10m14s | 1.761 MB/s |
+| 8 | prepay, waves | 14m29s | 1.244 — REGRESSION: pass churn re-prepaid peers (0.68 xBZZ parked; per-peer amounts unrecorded — standing deposit, recovery path = surplus-aware sync, M6.5) |
+| 9 | + surplus tracking | 12m17s | 1.467 |
+| 10 | + rolling admission | 15m18s | 1.178 — driver's per-invocation spend cap (0.09 xBZZ) chopped the roll every ~38k chunks |
+| 11 | + cap fixed (0.7/invocation) | **7m08s** | **2.526 MB/s**, spend 0.5037 |
+
+Flow inside the rolling window peaked **5.8 MB/s** (1,410 chunks/s).
+Member-scaling confirmed en route: one bucket from 1 vs 4 members =
+43.9 s vs 23.4 s. Residuals zero or peer-confirmed throughout; smoke
+run parked only 0.0004 xBZZ across 20 storers (convergence works).
+
+**Honest ledger of the two regressions:** run 8's churn parked
+0.68 xBZZ at peers before per-peer tracking existed (recoverable only
+by a future surplus-aware mirror sync — the peer's own zero-debt ACK
+is the honest signal); run 10 was our own driver cap. Both diagnosed
+from logs, fixed same session.
+
+**Next (M6 continues):** stake-registry rosters (more members per
+bucket), bandwidth-EWMA-ranked member selection (data now exists),
+tail policy on top of rolling (the 428 s wall is ~2× the flow-limited
+floor; remainder = slow-member tails + mop-up invocation), daemon mode,
+then the >110-window etiquette review.
+
+| spend item (this entry) | amount |
+|---|---|
+| M6 runs 8–11 + smoke + member-scaling cheques | 2.9280 xBZZ |
+| of which tracked parked surplus (reusable) | 0.1257 xBZZ |
+| untracked parked (run-8 legacy, standing deposit) | ~0.68 xBZZ |
+| wallet→chequebook deposit (moved, not spent) | (3.000 xBZZ) |
+
+Lifetime issued 6.32 xBZZ; issuable ~7.0 → headroom ~0.68 (⚠ next
+full-GiB run needs another ~1–2 xBZZ top-up; Nook wallet 14.47 xBZZ).
+Batch 47265a62 TTL ~5.5 d — top-up due in ~3 days (~1.1 xBZZ, standing
+grant).
+
 ## 2026-08-24 (cont.) — prepaid depth-scaling measured: a storer serves
 ## one connection at ~50 chunks/s (0.20 MB/s) regardless of pipeline
 ## depth ≥8; optimal in-flight ≈ 8 (p50 86 ms; depth 32 queues 563 ms)
