@@ -222,7 +222,7 @@ struct Conn {
     chequebook: [u8; 20],
     chain_id: u64,
     acct: Arc<Mirror>,
-    ledger: ant_p2p::swap::OutboundLedger,
+    ledger: Arc<crate::ledger::FastLedger>,
     issuable: U256,
     issued_plur: AtomicU64,
     max_issue_plur: u64,
@@ -725,7 +725,7 @@ pub async fn probe_growth(
     let ev = EventLog::open(&opts.jsonl_path)?;
 
     let issuable = read_chequebook_issuable_raw(&opts.rpc_url, opts.chequebook).await?;
-    let ledger = ant_p2p::swap::OutboundLedger::open(Some(opts.ledger_path.clone()));
+    let ledger = crate::ledger::FastLedger::open(opts.ledger_path.clone());
 
     let behaviour = Behaviour {
         stream: libp2p_stream::Behaviour::default(),
@@ -928,6 +928,9 @@ pub async fn probe_growth(
     let (done_tx, done_rx) = oneshot::channel();
     let _ = bye_tx.send(done_tx);
     let _ = tokio::time::timeout(Duration::from_secs(3), done_rx).await;
+    if let Err(err) = conn.ledger.flush() {
+        tracing::warn!("ledger flush: {err}");
+    }
 
     let threshold_last = conn.threshold();
     // Upgrades = threshold delta over the light-peer step (450 k), the

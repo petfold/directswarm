@@ -247,9 +247,7 @@ pub async fn fetch_scheduled(
     // cumulative forever — the M4 diagnosis).
     let issuable = read_chequebook_issuable_raw(&opts.rpc_url, opts.chequebook).await?;
     let issued_plur = Arc::new(AtomicU64::new(0));
-    let ledger = Arc::new(ant_p2p::swap::OutboundLedger::open(Some(
-        opts.ledger_path.clone(),
-    )));
+    let ledger = crate::ledger::FastLedger::open(opts.ledger_path.clone());
     tracing::info!(%issuable, "chequebook cached invariant read once (shared spend cap across connections)");
 
     // Select storers per bucket: breadth first (one per non-empty
@@ -420,6 +418,9 @@ pub async fn fetch_scheduled(
     drop(fb_tx);
     let fb_fails = fb_handle.await.unwrap_or_default();
     store.flush()?;
+    if let Err(err) = ledger.flush() {
+        tracing::warn!("ledger flush: {err}");
+    }
 
     report.wall = started.elapsed();
     report.connections_opened =
@@ -581,7 +582,7 @@ struct ConnArgs {
     chequebook: [u8; 20],
     issuable: U256,
     issued_plur: Arc<AtomicU64>,
-    ledger: Arc<ant_p2p::swap::OutboundLedger>,
+    ledger: Arc<crate::ledger::FastLedger>,
     max_issue_plur: u64,
     pipeline: usize,
     store: Arc<ChunkStore>,

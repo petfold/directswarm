@@ -126,7 +126,7 @@ pub async fn probe_storer(
 
     // --- cached invariant: one on-chain read, then no per-cheque RPC ---
     let issuable = read_chequebook_issuable(opts).await?;
-    let ledger = ant_p2p::swap::OutboundLedger::open(Some(opts.ledger_path.clone()));
+    let ledger = crate::ledger::FastLedger::open(opts.ledger_path.clone());
     tracing::info!(
         issuable_plur = %issuable,
         "chequebook cached invariant (balance + totalPaidOut) read once"
@@ -647,7 +647,7 @@ struct SettleCtx {
     chequebook: [u8; 20],
     beneficiary: [u8; 20],
     chain_id: u64,
-    ledger: ant_p2p::swap::OutboundLedger,
+    ledger: std::sync::Arc<crate::ledger::FastLedger>,
     /// Cached `balance + totalPaidOut` — the invariant ceiling on the
     /// beneficiary's cumulative payout. Single-beneficiary guard is
     /// exact for M2; the multi-peer scheduler sums the ledger.
@@ -811,7 +811,7 @@ pub(crate) struct ChequeEmit<'a> {
     pub beneficiary: [u8; 20],
     pub chain_id: u64,
     pub debt_units: u64,
-    pub ledger: &'a ant_p2p::swap::OutboundLedger,
+    pub ledger: &'a crate::ledger::FastLedger,
     /// Cached `balance + totalPaidOut` ceiling on cumulative payout.
     pub issuable: U256,
     /// PLUR issued so far (shared across peers for a global spend cap).
@@ -897,9 +897,7 @@ pub(crate) async fn emit_settlement_cheque(e: ChequeEmit<'_>) -> Result<RateEmit
         stream.write_all(&frame).await?;
         stream.flush().await?;
         let _ = stream.close().await;
-        if let Err(err) = e.ledger.record_issued(&e.beneficiary, cumulative) {
-            tracing::warn!("outbound ledger persist failed after emit: {err}");
-        }
+        e.ledger.record_issued(&e.beneficiary, cumulative);
         Ok::<U256, anyhow::Error>(cumulative)
     }
     .await;
