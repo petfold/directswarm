@@ -58,6 +58,11 @@ pub struct GrowthArgs {
     /// Number of validation-latency samples between growth and ceiling.
     #[arg(long, default_value_t = 3)]
     pub lambda_samples: u32,
+    /// Prepay this many CHUNKS' worth of units as one up-front cheque
+    /// before the ceiling phase (0 = off). Tests surplus-funded,
+    /// throttle-free serving.
+    #[arg(long, default_value_t = 0)]
+    pub prepay_chunks: u64,
     #[arg(long, default_value_t = 1)]
     pub network_id: u64,
     #[arg(long, default_value_t = 100)]
@@ -184,6 +189,10 @@ pub async fn run(args: GrowthArgs) -> i32 {
         growth_secs: args.growth_secs,
         ceiling_secs: args.ceiling_secs,
         lambda_samples: args.lambda_samples,
+        prepay_units: args.prepay_chunks
+            * chunks
+                .first()
+                .map_or(220_000, |a| ds_net::peer_price_for(&overlay, a)),
         jsonl_path,
     };
     let report = match ds_net::probe_growth(&identity, &target, chunks, &opts).await {

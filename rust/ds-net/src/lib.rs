@@ -28,3 +28,10 @@ pub use direct::{probe_storer, ProbeOptions, ProbeReport, ProbeTarget};
 pub use growth::{probe_growth, GrowthOptions, GrowthReport, PhaseStats};
 pub use fetch::{fetch_to_file, FetchError, FetchOutcome, MAX_FETCH_BYTES};
 pub use identity::Identity;
+
+/// Price a storer charges for serving `chunk` (bee's fixed pricer,
+/// re-exported for CLI-side estimates like prepay sizing).
+#[must_use]
+pub fn peer_price_for(storer_overlay: &[u8; 32], chunk: &[u8; 32]) -> u64 {
+    ant_retrieval::accounting::Accounting::peer_price(storer_overlay, chunk)
+}

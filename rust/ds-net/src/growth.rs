@@ -91,6 +91,13 @@ pub struct GrowthOptions {
     pub ceiling_secs: u64,
     /// Number of λ samples between growth and ceiling.
     pub lambda_samples: u32,
+    /// Prepay this many accounting units as ONE cheque before the
+    /// ceiling phase (0 = off). Bee parks over-payment in a persisted
+    /// per-peer surplus and its debit path consumes surplus BEFORE
+    /// touching the balance, so prepaid service never approaches the
+    /// threshold/validation throttle — the per-connection ceiling
+    /// becomes the wire, not the accounting.
+    pub prepay_units: u64,
     /// JSONL event log (one line per threshold/cheque/sample/λ event).
     pub jsonl_path: PathBuf,
 }
@@ -240,6 +247,10 @@ struct Conn {
     /// (emit time, units) of cheques possibly still in bee's validation
     /// pipeline; pruned against the λ window in Phase C.
     unvalidated: VecDeque<(Instant, u64)>,
+    /// Units prepaid via one up-front cheque (bee-side surplus). The
+    /// mirror does NOT credit these: mirror debt counts consumption,
+    /// and bee's view of our debt is mirror debt MINUS this.
+    prepaid: u64,
     ev: EventLog,
 }
 
@@ -266,14 +277,15 @@ impl Conn {
     /// trips.
     fn spend_would_exceed(&self, next_price: u64) -> bool {
         let (debt, reserved) = self.debt();
+        let unpaid = (debt + reserved + next_price).saturating_sub(self.prepaid);
         let committed = u128::from(self.issued_plur.load(Ordering::SeqCst))
-            + u128::from(debt + reserved + next_price) * self.rate();
+            + u128::from(unpaid) * self.rate();
         committed > u128::from(self.max_issue_plur) * 92 / 100
     }
 
     async fn refresh(&mut self) {
         let (debt, _) = self.debt();
-        if debt == 0 {
+        if debt.saturating_sub(self.prepaid) == 0 {
             self.last_refresh = Some(Instant::now());
             return;
         }
@@ -317,6 +329,39 @@ impl Conn {
         self.unvalidated.push_back((Instant::now(), units));
         self.ev.line(&format!(
             "\"ev\":\"cheque\",\"units\":{units},\"plur\":\"{}\",\"cumulative\":\"{}\"",
+            outcome.plur_u256, outcome.cumulative
+        ));
+        Ok(())
+    }
+
+    /// One up-front cheque for `units`; bee parks it as surplus. No
+    /// mirror credit — consumption is tracked as mirror debt against
+    /// `self.prepaid`.
+    async fn prepay(&mut self, units: u64) -> Result<()> {
+        let outcome = emit_settlement_cheque(ChequeEmit {
+            control: &mut self.control,
+            peer_id: self.peer_id,
+            secret: &self.secret,
+            chequebook: self.chequebook,
+            beneficiary: self.beneficiary,
+            chain_id: self.chain_id,
+            debt_units: units,
+            ledger: &self.ledger,
+            issuable: self.issuable,
+            issued_plur: &self.issued_plur,
+            max_issue_plur: self.max_issue_plur,
+        })
+        .await?;
+        self.prepaid = units;
+        self.cheques += 1;
+        self.cheque_units += units;
+        self.cheque_plur += outcome.plur;
+        if self.exchange_rate.is_none() {
+            self.exchange_rate = Some(outcome.rate);
+        }
+        self.unvalidated.push_back((Instant::now(), units));
+        self.ev.line(&format!(
+            "\"ev\":\"prepay\",\"units\":{units},\"plur\":\"{}\",\"cumulative\":\"{}\"",
             outcome.plur_u256, outcome.cumulative
         ));
         Ok(())
@@ -480,7 +525,9 @@ async fn run_fetch_phase(
                 PhaseMode::Growth => last_threshold / 2,
                 PhaseMode::Ceiling { lambda_window } => {
                     let unvalidated = conn.unvalidated_within(*lambda_window);
-                    (last_threshold * 105 / 100).saturating_sub(unvalidated)
+                    // Prepaid surplus is spendable exposure on top of
+                    // the usual threshold headroom.
+                    (conn.prepaid + last_threshold * 105 / 100).saturating_sub(unvalidated)
                 }
             };
             if !conn.acct.try_reserve(price, limit) {
@@ -492,7 +539,15 @@ async fn run_fetch_phase(
             let acct = conn.acct.clone();
             tasks.spawn(async move {
                 let t = Instant::now();
-                match retrieve_chunk(&mut control, peer_id, addr).await {
+                // A wedged retrieval must fail loudly, not silently
+                // occupy a pipeline slot forever (a stalled peer once
+                // froze a probe with 0 errors reported).
+                let fetched =
+                    tokio::time::timeout(Duration::from_secs(10), retrieve_chunk(&mut control, peer_id, addr))
+                        .await
+                        .map_err(|_| "timeout (10s)".to_owned())
+                        .and_then(|r| r.map_err(|e| e.to_string()));
+                match fetched {
                     Ok(chunk) => {
                         acct.apply(price);
                         Ok((
@@ -555,7 +610,9 @@ async fn run_fetch_phase(
                 let due = conn
                     .last_cheque
                     .is_none_or(|at| at.elapsed() >= Duration::from_millis(500));
-                (due && debt_now >= last_threshold / 5, debt_now)
+                // Only settle consumption BEYOND the prepaid surplus.
+                let unpaid = debt_now.saturating_sub(conn.prepaid);
+                (due && unpaid >= last_threshold / 5, unpaid)
             }
         };
         if want_cheque && conn.alive.load(Ordering::Relaxed) {
@@ -827,6 +884,7 @@ pub async fn probe_growth(
         last_refresh: None,
         last_cheque: None,
         unvalidated: VecDeque::new(),
+        prepaid: 0,
         ev,
     };
     let threshold_first = conn.threshold();
@@ -867,6 +925,18 @@ pub async fn probe_growth(
         lambda_ms.push(lambda_sample(&mut conn, &chunks, &mut cycle_idx).await);
     }
 
+    // --- prepay (optional): one up-front cheque, then wait out its
+    // validation before leaning on the surplus ---
+    if opts.prepay_units > 0 && conn.alive.load(Ordering::Relaxed) && !spend_capped {
+        let lambda_max = lambda_ms.iter().flatten().max().copied().unwrap_or(3000);
+        match conn.prepay(opts.prepay_units).await {
+            Ok(()) => {
+                tokio::time::sleep(Duration::from_millis(lambda_max.max(800) * 3 / 2 + 500)).await;
+            }
+            Err(err) => tracing::warn!("prepay failed, ceiling runs unprepaid: {err}"),
+        }
+    }
+
     // --- Phase C: λ-aware ceiling ---
     let ceiling = if opts.ceiling_secs > 0 && conn.alive.load(Ordering::Relaxed) && !spend_capped {
         let lambda_max = lambda_ms.iter().flatten().max().copied().unwrap_or(3000);
@@ -892,6 +962,7 @@ pub async fn probe_growth(
     let mut residual_zero_confirmed = None;
     for _ in 0..3 {
         let (debt, _) = conn.debt();
+        let debt = debt.saturating_sub(conn.prepaid);
         if debt == 0 {
             break;
         }
