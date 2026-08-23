@@ -305,18 +305,41 @@ pub async fn fetch_scheduled(
     let fb_handle = tokio::spawn(async move {
         use ant_retrieval::ChunkFetcher;
         let mut rx = fb_rx;
-        let mut fails = Vec::new();
-        while let Some(addr) = rx.recv().await {
+        let fallback = Arc::new(fallback);
+        let mut fails: Vec<String> = Vec::new();
+        // Modest concurrency: bee serializes cold forwarding retrievals
+        // per request, so a few in flight cut the tail-drain wall time
+        // without leaning on the local node.
+        let mut tasks: tokio::task::JoinSet<Option<String>> = tokio::task::JoinSet::new();
+        loop {
+            while tasks.len() >= 8 {
+                if let Some(Ok(Some(err))) = tasks.join_next().await {
+                    fails.push(err);
+                }
+            }
+            let Some(addr) = rx.recv().await else { break };
             if fb_store.contains(&addr) {
                 continue;
             }
-            match fallback.fetch(addr).await {
-                Ok(wire) => {
-                    let _ = fb_store.put(addr, &wire);
-                    fb_bytes2.fetch_add(wire.len() as u64, Ordering::Relaxed);
-                    fb_count2.fetch_add(1, Ordering::Relaxed);
+            let f = fallback.clone();
+            let st = fb_store.clone();
+            let b = fb_bytes2.clone();
+            let c = fb_count2.clone();
+            tasks.spawn(async move {
+                match f.fetch(addr).await {
+                    Ok(wire) => {
+                        let _ = st.put(addr, &wire);
+                        b.fetch_add(wire.len() as u64, Ordering::Relaxed);
+                        c.fetch_add(1, Ordering::Relaxed);
+                        None
+                    }
+                    Err(err) => Some(format!("fallback {}: {err}", hex::encode(addr))),
                 }
-                Err(err) => fails.push(format!("fallback {}: {err}", hex::encode(addr))),
+            });
+        }
+        while let Some(joined) = tasks.join_next().await {
+            if let Ok(Some(err)) = joined {
+                fails.push(err);
             }
         }
         fails

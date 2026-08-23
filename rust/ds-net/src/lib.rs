@@ -13,6 +13,7 @@ pub mod bee_api;
 pub mod crawl;
 pub mod direct;
 pub mod fetch;
+pub mod fund;
 pub mod growth;
 pub mod hive;
 pub mod identity;

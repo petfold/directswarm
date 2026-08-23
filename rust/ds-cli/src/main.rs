@@ -5,6 +5,7 @@
 
 mod crawl;
 mod fetchdirect;
+mod fund;
 mod growth_cmd;
 mod probe;
 
@@ -48,6 +49,9 @@ enum Command {
     /// M5 groundwork: threshold-growth + cheque-validation-latency probe
     /// against one storer (long-lived settled connection).
     ProbeGrowth(Box<growth_cmd::GrowthArgs>),
+    /// Deposit BZZ from the settlement wallet into its chequebook
+    /// (spends real xBZZ; prints balances and the tx hash).
+    FundChequebook(Box<fund::FundArgs>),
 }
 
 fn parse_ref(reference: &str) -> Result<[u8; 32], String> {
@@ -94,6 +98,10 @@ async fn main() {
         }
         Command::ProbeGrowth(args) => {
             let code = growth_cmd::run(*args).await;
+            std::process::exit(code);
+        }
+        Command::FundChequebook(args) => {
+            let code = fund::run(*args).await;
             std::process::exit(code);
         }
     }
