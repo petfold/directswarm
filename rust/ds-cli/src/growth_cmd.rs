@@ -63,6 +63,9 @@ pub struct GrowthArgs {
     /// throttle-free serving.
     #[arg(long, default_value_t = 0)]
     pub prepay_chunks: u64,
+    /// Concurrent in-flight chunk requests (etiquette cap 32).
+    #[arg(long, default_value_t = 16)]
+    pub pipeline: usize,
     #[arg(long, default_value_t = 1)]
     pub network_id: u64,
     #[arg(long, default_value_t = 100)]
@@ -184,7 +187,7 @@ pub async fn run(args: GrowthArgs) -> i32 {
         chequebook,
         rpc_url: args.rpc_url.clone(),
         ledger_path: args.ledger.clone(),
-        pipeline_depth: 16,
+        pipeline_depth: args.pipeline.clamp(1, 32),
         max_issue_plur: args.max_issue_plur,
         growth_secs: args.growth_secs,
         ceiling_secs: args.ceiling_secs,

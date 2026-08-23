@@ -473,6 +473,7 @@ async fn run_fetch_phase(
     wall_cap: Duration,
     mode: &PhaseMode,
     phase_name: &str,
+    pipeline: usize,
 ) -> PhaseOutcome {
     let started = Instant::now();
     let mut stats = PhaseStats::default();
@@ -512,7 +513,7 @@ async fn run_fetch_phase(
         }
 
         // -- spawn fetches under the gate --
-        while !stopping && tasks.len() < conn_pipeline_depth(mode) {
+        while !stopping && tasks.len() < conn_pipeline_depth(mode, pipeline) {
             let addr = chunks[*cycle_idx % chunks.len()];
             let price = Accounting::peer_price(&conn.storer_overlay, &addr);
             if conn.spend_would_exceed(price) {
@@ -660,10 +661,10 @@ async fn run_fetch_phase(
     }
 }
 
-fn conn_pipeline_depth(mode: &PhaseMode) -> usize {
+fn conn_pipeline_depth(mode: &PhaseMode, configured: usize) -> usize {
     match mode {
-        PhaseMode::Growth => 8,
-        PhaseMode::Ceiling { .. } => 16,
+        PhaseMode::Growth => configured.min(8),
+        PhaseMode::Ceiling { .. } => configured,
     }
 }
 
@@ -908,6 +909,7 @@ pub async fn probe_growth(
             Duration::from_secs(opts.growth_secs),
             &PhaseMode::Growth,
             "growth",
+            opts.pipeline_depth,
         )
         .await;
         spend_capped |= out.spend_capped;
@@ -950,6 +952,7 @@ pub async fn probe_growth(
                 lambda_window: window,
             },
             "ceiling",
+            opts.pipeline_depth,
         )
         .await;
         spend_capped |= out.spend_capped;

@@ -1,5 +1,19 @@
 # directswarm — STATUS
 
+## 2026-08-24 (cont.) — prepaid depth-scaling measured: a storer serves
+## one connection at ~50 chunks/s (0.20 MB/s) regardless of pipeline
+## depth ≥8; optimal in-flight ≈ 8 (p50 86 ms; depth 32 queues 563 ms)
+
+`probe-growth --pipeline N` added. Prepaid runs on the pilot storer:
+depth 8 → 48.7 chunks/s @ p50 86 ms; 16 → 41.5 @ 236 ms; 32 → 49.5 @
+563 ms. Flat throughput + latency ∝ depth = server-side per-connection
+service ceiling. Implications: (a) default depth drops to 8;
+(b) 110 conns × 0.2 MB/s = 22 MB/s aggregate potential on prepaid
+plane; (c) per-neighborhood throughput multiplies by serving from
+SEVERAL members in parallel — load balancing across neighborhood
+members is the next lever (pull-based queues already balance
+demand-proportionally). Spend ~0.029 xBZZ (two prepaid runs), ledgered.
+
 ## 2026-08-24 — PREPAYMENT measured (user's idea): one up-front cheque
 ## DOUBLES the single-connection rate; protocol-valid in stock bee
 
