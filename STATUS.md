@@ -1,5 +1,40 @@
 # directswarm — STATUS
 
+## 2026-08-24 (M6.4 refinement) — member-parallelism A/B: SLOTS, not
+## member choice, are the binding mid-run resource; 45 s drain target
+## restored (run 13 confirmed near-optimal)
+
+User asked whether we load-balance within neighborhoods and whether to
+avoid slow nodes. Data answers: (a) yes — shared pull-queues distribute
+work demand-proportionally among selected members, and selection is
+bandwidth-ranked; run 13's wall (479 s) is within 18% of the
+peerstate-predicted single-member-per-bucket optimum (407 s + setup);
+(b) "avoid slow" is already policy, but 163/512 neighborhoods (32%)
+have NO fast member (best-known <10 chunks/s; only 38 buckets own a
+≥20 member) — there, someone slow must serve.
+
+**A/B (run 14):** forcing multi-member parallelism everywhere (drain
+target 45→20 s) made things WORSE: 549 s / 0.8636 xBZZ (vs run 13's
+479 s / 0.5861), byte-exact both. Lesson: under a fixed 110-slot
+budget, aggregate = slots × average ACTIVE-member rate; adding
+second-best (slower) members mid-run LOWERS slot productivity and adds
+dial/prepay overhead. Member-parallelism pays only at the TAIL (slots
+otherwise idle) and on critical-path buckets — which the 45 s target +
+late-hedge queue already approximates. Reverted to 45 s.
+
+**Refined bottleneck ranking for the wall (data-backed):** 1) per-slot
+setup (dial+handshake+settle ≈ 15–25 s per target vs ~40 s of work) —
+the structural fix is daemon-mode persistent connections (M6.5);
+2) network member-speed distribution (median best-of-bucket 12
+chunks/s) — roster quality, not our code; 3) tail policy.
+
+| spend item (this entry) | amount |
+|---|---|
+| run 14 cheques (A/B, negative result) | 0.8636 xBZZ |
+
+Lifetime issued 8.395 xBZZ vs issuable ~9.0 → headroom ~0.6 (⚠ next
+run needs a top-up; wallet has 12.47 xBZZ).
+
 ## 2026-08-24 (M6.3 cont.) — swarmscan cross-check + underlay merge:
 ## every neighborhood now dialable-staked (fallback no longer
 ## structurally required); clean run 13 = 7m59s byte-exact
