@@ -834,7 +834,19 @@ async fn run_connection(a: ConnArgs) -> u64 {
         return 0;
     }
     a.opened.fetch_add(1, Ordering::Relaxed);
-    tokio::time::sleep(POST_HANDSHAKE_SETTLE).await;
+    // Wait for the pricing announcement instead of a fixed sleep (bee
+    // announces within ~100-300 ms; cap at the old 2 s).
+    {
+        let mut rx = threshold_rx.clone();
+        let _ = tokio::time::timeout(POST_HANDSHAKE_SETTLE, async {
+            while rx.borrow().is_none() {
+                if rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        })
+        .await;
+    }
 
     let known = a.peerstate.get(&info.remote_overlay);
     let mut pacer = Pacer {
@@ -874,6 +886,18 @@ async fn run_connection(a: ConnArgs) -> u64 {
             measured_lambda = Some(l);
             a.lambdas_measured.fetch_add(1, Ordering::Relaxed);
             tracing::info!(peer=%peer_id, lambda_ms=l, "validation latency measured");
+        }
+    }
+
+    // Prepay mode: emit the initial slice NOW so its validation window
+    // overlaps the remaining connection setup instead of freezing the
+    // first seconds of flow (measured: ~10 s dead start per connection
+    // when the prepay waited for the drive loop's first settle tick).
+    // Skip when reused surplus already covers a useful chunk of work.
+    if ctx.a.prepay && pacer.prepaid < 25 * 230_000 {
+        let units = 250u64 * 230_000;
+        if let Err(err) = emit_prepay(&mut ctx, &mut pacer, units).await {
+            tracing::debug!(peer=%peer_id, "initial prepay failed (drive loop will retry): {err}");
         }
     }
 
