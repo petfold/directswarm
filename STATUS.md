@@ -1,5 +1,34 @@
 # directswarm — STATUS
 
+## 2026-08-24 (late) — the 10× question: depth is NOT the lever
+## (measured), the scheduler-vs-probe efficiency gap IS (~3×), and the
+## 10× is a multiplicative stack, not a silver bullet
+
+User asked what on the roadmap can give 10× (256 conns alone ≈ 2×).
+Measured tonight on a median peer (in-run EWMA 8 chunks/s):
+- depth 8 vs 32 (prepaid probe): 23 vs 24 chunks/s, p50 268 → 1273 ms
+  — flat rate, latency ∝ depth ⇒ per-peer SERVER-side ceiling; the
+  RTT/bandwidth-delay hypothesis for the fleet median is dead.
+- BUT the probe extracted 23 chunks/s from a peer the scheduler only
+  gets 8 from ⇒ **~3× in-run efficiency gap** (candidates: EWMA
+  measurement including setup/sweep in the denominator, admission
+  gaps around prepay/top-up windows, bucket-end idling, tick
+  granularity). Diagnosing this is the top client-side item.
+
+**The 10× stack (multiplicative, all measured or bounded):**
+1. in-run efficiency (probe-vs-scheduler gap): ~2–3×
+2. window 110 → 256 → 512 (one per neighborhood): 2.3–4.7×
+   (256 ramp is ISP-safe to try; 512 needs the incremental ramp test)
+3. daemon-warm persistent connections (setup ≈ 40% of wall): ~1.5×
+4. wildcard, upstream: why do storers serve one client at only
+   ~23–50 chunks/s (43 ms/chunk service time — plausibly bee's
+   per-chunk accounting write)? A bee-side batching fix (#5570-class
+   proposal, needs user gate) could lift EVERY storer 2–5×.
+Items 1×2×3 span ≈ 8–20× ⇒ 25 MB/s is inside the stack without the
+wildcard. Also found: private-range ip4 underlays slipped into
+topology-staked.csv (merge filter gap) — fix queued. Probe spend
+~0.03 xBZZ.
+
 ## 2026-08-24 (M6.4 refinement) — member-parallelism A/B: SLOTS, not
 ## member choice, are the binding mid-run resource; 45 s drain target
 ## restored (run 13 confirmed near-optimal)
