@@ -1,5 +1,49 @@
 # directswarm — STATUS
 
+## 2026-08-23 (evening) — M5 ACCEPTANCE BATTERY DONE — Phase 1
+## measurements complete; REPORT-phase1.md written; human review open
+
+**Chequebook funded (user-approved):** Nook wallet →3.0 xBZZ→ spike
+wallet (bee withdraw, tx `0x6f964265…`) →3.0 xBZZ→ chequebook deposit
+(new `fund-chequebook` command, signed ERC-20 transfer, tx
+`0x349daae0…`); chequebook 0.981 → 3.981 xBZZ.
+
+**Battery: 5 × full-1 GiB cold-store runs, 110 conns, redundancy 2,
+multi-pass over all 512 neighborhoods + parallel bee-fallback drain +
+reassembly verify.** Results (full table + honesty notes in
+REPORT-phase1.md):
+- walls 51:03 / 33:02 / 22:03 / 18:59 / 19:07 → **median 0.817 MB/s
+  per byte-complete GiB** (max 0.949; warm within-pass peak 1.36);
+- **byte-exact SHA-256 vs the wsbench reference on runs 1 and 5**;
+  runs 2–4 skipped reassembly-verify (drain-pass bug: errored when no
+  cache storer covered the tail — FIXED same day; all chunks in all
+  runs BMT-validated at fetch time);
+- **median cost 0.436 xBZZ/GiB**; ~99.8% of chunks over the direct
+  settled plane; 1,159 lifetime beneficiaries, 1,188 peers in
+  peerstate; runs sped up 51→19 min as thresholds grew (earned trust);
+- residual owed-on-drop ~0.001 xBZZ/run, auto-repaid at next contact.
+
+**Acceptance verdict: correctness + scaling shape PASS; the 25 MB/s
+number NOT met (30×)** — decomposed in the report: at 1 GiB each
+neighborhood holds only ~2.1 MB, so connection setup (~15–25 s)
+cancels the ~25 s of flow per storer; a 10 GiB payload projects to
+~9–15 MB/s on the same machinery. **Phase-1 review gate open**;
+options for the human: accept with the measured curve (target restated
+as MB/s at N GiB), or fund a 10 GiB experiment (~0.9 xBZZ postage +
+~4.4 xBZZ per full settled fetch).
+
+| spend item (this entry) | amount |
+|---|---|
+| acceptance runs 1–5 cheques | 2.2332 xBZZ |
+| wallet→chequebook deposit (moved, not spent) | (3.000 xBZZ) |
+| gas (withdraw + ERC-20 transfer) | ~0.0001 xDAI |
+
+Balances after: Nook wallet 17.47 xBZZ / ~1.19 xDAI; spike wallet
+0.5 xBZZ / ~0.1 xDAI; chequebook 3.981 xBZZ on-chain, lifetime issued
+2.414 (uncashed cheques are liabilities against it — headroom ~1.57).
+Batch 47265a62 TTL 6.1 days (top-up ~1.1 xBZZ/4 days when due —
+standing grant).
+
 ## 2026-08-23 (later) — M5 scheduler rebuilt on measured constants +
 ## connection ramp 20→50→110 MEASURED — scaling now linear, 0.72 MB/s
 ## aggregate warm at 110 conns (peak flow ~1.8 MB/s)

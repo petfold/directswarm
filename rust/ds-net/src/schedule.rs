@@ -262,9 +262,10 @@ pub async fn fetch_scheduled(
         opts.redundancy.max(1),
         &peerstate,
     );
-    if selected.is_empty() {
+    if selected.is_empty() && opts.direct_only {
         return Err(anyhow!("no storer in the cache covers any needed chunk"));
     }
+    let selected_was_empty = selected.is_empty();
     let covered: std::collections::HashSet<u64> = selected.iter().map(|s| s.prefix).collect();
 
     // Route chunks: covered → shared work buckets (any covering
@@ -437,7 +438,7 @@ pub async fn fetch_scheduled(
         .saturating_sub(report.chunks_from_direct + report.chunks_from_fallback)
         .saturating_sub(report.chunks_dropped_uncovered);
     report.errors.extend(fb_fails);
-    if report.connections_opened == 0 {
+    if report.connections_opened == 0 && !selected_was_empty {
         return Err(anyhow!("no storer connection established"));
     }
     Ok(report)
