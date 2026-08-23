@@ -1,5 +1,38 @@
 # directswarm — STATUS
 
+## 2026-08-23 (night) — post-battery diagnosis (user: "that is a
+## failure — diagnose"): THE AGGREGATE CEILING WAS OUR OWN LEDGER'S
+## FSYNC — fixed and A/B-measured (flow 1.36 → 3.9 MB/s)
+
+Battery cheque rates were FLAT (26–32/s across all five runs, in-pass
+peak 54/s) despite wildly different threshold regimes and 220/s of
+per-connection headroom → a shared serializer. Found: ant's
+`OutboundLedger::record_issued` re-serializes the whole beneficiary
+map (1,159 entries) and **fsyncs a temp file under one global mutex on
+every cheque**, and the emit is awaited inline in each connection's
+drive loop (stalling its fetch admission too) — the Phase-0 bee
+chequebook-mutex finding (#5570) reproduced in our own client. This
+capped the node-wide aggregate at ~1–1.4 MB/s regardless of connection
+count and fully explains the probe-vs-scheduler 10× per-conn gap
+(single-conn probe at 1.3 cheques/s never felt it).
+
+**Fix:** `FastLedger` — in-memory authoritative, 200 ms debounced
+background persist off the tokio workers, same JSON format
+(ant-compatible, roundtrip-tested), flush at run end; crash window
+≤200 ms of cheques, bounded + self-healing, documented. **A/B (same
+warm 110-conn workload): bulk 116 MB in ~40 s, flow peak 3.88 MB/s
+(945 chunks/s) vs 1.8 pre-fix; cheque rate 75/s.** The pass is now
+work-starved (buckets drain), the wall tail is slow-λ storers — a
+selection/hedging problem, not a ceiling. Third serialized
+money-critical section found on this path (bee chequebook mutex, ant
+fresh-threshold cap, our ledger fsync) — the settlement path attracts
+this bug class; audit rule added to the M6 list. Full diagnosis
+narrative → next session's REPORT addendum; spend 0.053 xBZZ (A/B).
+
+| spend item (this entry) | amount |
+|---|---|
+| A/B warm pass cheques | 0.0529 xBZZ |
+
 ## 2026-08-23 (evening) — M5 ACCEPTANCE BATTERY DONE — Phase 1
 ## measurements complete; REPORT-phase1.md written; human review open
 
