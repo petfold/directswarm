@@ -174,17 +174,17 @@ impl EventLog {
 /// exactly what this probe exists to escape. Found live in the pilot:
 /// ceiling-phase rate pinned at ~450 k units/s regardless of T.)
 #[derive(Default)]
-struct Mirror {
+pub(crate) struct Mirror {
     state: Arc<Mutex<(u64, u64)>>, // (balance = unsettled debt, reserved)
 }
 
 impl Mirror {
-    fn snapshot(&self) -> (u64, u64) {
+    pub(crate) fn snapshot(&self) -> (u64, u64) {
         *self.state.lock().expect("mirror lock")
     }
 
     /// Reserve `price` if `balance + reserved + price <= limit`.
-    fn try_reserve(&self, price: u64, limit: u64) -> bool {
+    pub(crate) fn try_reserve(&self, price: u64, limit: u64) -> bool {
         let mut s = self.state.lock().expect("mirror lock");
         if s.0.saturating_add(s.1).saturating_add(price) > limit {
             return false;
@@ -194,20 +194,20 @@ impl Mirror {
     }
 
     /// Served: move `price` from reserved into debt.
-    fn apply(&self, price: u64) {
+    pub(crate) fn apply(&self, price: u64) {
         let mut s = self.state.lock().expect("mirror lock");
         s.1 = s.1.saturating_sub(price);
         s.0 = s.0.saturating_add(price);
     }
 
     /// Fetch failed: release the reservation.
-    fn release(&self, price: u64) {
+    pub(crate) fn release(&self, price: u64) {
         let mut s = self.state.lock().expect("mirror lock");
         s.1 = s.1.saturating_sub(price);
     }
 
     /// Settlement accepted (cheque emitted / refresh acknowledged).
-    fn credit(&self, amount: u64) {
+    pub(crate) fn credit(&self, amount: u64) {
         let mut s = self.state.lock().expect("mirror lock");
         s.0 = s.0.saturating_sub(amount);
     }
@@ -338,7 +338,7 @@ impl Conn {
 /// (the stock `refresh_peer` over-asks, which is right for settlement
 /// and wrong for probing — a large ask drains the debt being watched).
 /// Returns bee's accepted amount: `min(attempted, allowance, debt)`.
-async fn refresh_probe(control: &mut Control, peer: PeerId, attempted: u64) -> Result<u64> {
+pub(crate) async fn refresh_probe(control: &mut Control, peer: PeerId, attempted: u64) -> Result<u64> {
     let mut stream = control
         .open_stream(
             peer,
@@ -369,7 +369,7 @@ async fn refresh_probe(control: &mut Control, peer: PeerId, attempted: u64) -> R
 }
 
 /// `PaymentAck { bytes Amount = 1; int64 Timestamp = 2 }` → Amount as u64.
-fn parse_ack_amount(body: &[u8]) -> Option<u64> {
+pub(crate) fn parse_ack_amount(body: &[u8]) -> Option<u64> {
     let mut rest = body;
     let mut amount: Option<u64> = None;
     while !rest.is_empty() {

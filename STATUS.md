@@ -1,5 +1,77 @@
 # directswarm — STATUS
 
+## 2026-08-23 (later) — M5 scheduler rebuilt on measured constants +
+## connection ramp 20→50→110 MEASURED — scaling now linear, 0.72 MB/s
+## aggregate warm at 110 conns (peak flow ~1.8 MB/s)
+
+**Built (schedule.rs rework + peerstate.rs):**
+1. **Live-threshold pacing** — each connection parses pricing
+   announcements (M4 drained them) and paces against the live T.
+2. **λ-aware exposure control** (the probe's ceiling algorithm): bee's
+   worst-case ledger view (mirror debt + reserved + cheques within the
+   1.5λ window) ≤ 1.05 × T. λ per peer from the new persisted
+   peer-state cache (`.phase1/peerstate.csv`: threshold_last, λ,
+   settled volume), measured inline once on first contact (sweep
+   cheque + small pseudosettle probes), else a conservative default.
+3. **Threshold-aware mirror** replaces ant's `Accounting` here too
+   (same fresh-cap bug as the probe found).
+4. **Work-stealing**: chunks in shared per-neighborhood buckets; every
+   covering connection pulls, `--redundancy N` puts N storers on each
+   bucket so fast siblings absorb a slow storer's tail.
+5. **Selection by earned trust**: per bucket, measured-fast-λ first,
+   then last-known threshold, then RTT; slow validators deprioritized,
+   never refused. Overlay verified against the cache on handshake.
+6. Per-run zero-debt confirmation FROM THE PEER per connection;
+   10 s progress sampling for straggler-honest curves.
+
+**Measured (Ethernet, direct-only, full-payload bucket coverage):**
+| tier | conns | red. | direct chunks | MB | wall | aggregate | note |
+|---|---|---|---|---|---|---|---|
+| 1 | 20 | 1 | 9,282 | 38 | 1746 s | 0.022 MB/s | straggler-dominated: one slow storer alone on its bucket ran 25 min |
+| 2 | 50 | 2 | 13,534 | 56 | 192 s | **0.289 MB/s** | redundancy killed the tail |
+| 3 | 110 | 2 | 27,598 | 113 | 195 s | **0.581 MB/s** | 50→110 ≈ linear |
+| warm | 110 | 2 | 29,079 | 119 | 166 s | **0.718 MB/s** | peak flow ~**1.8 MB/s** (t=20–30 s: 440 chunks/s) |
+
+- **Scaling is linear in connections now** (old M4: flattened by 32
+  conns). Cold per-conn is warm-up-dominated (λ probe + fresh 1.35 M
+  thresholds); the warm run's early burst shows the grown regime:
+  ~0.016 MB/s/conn at only-partly-grown T after ~5 min of lifetime
+  paid volume per peer. Rate ∝ T and T grows with volume, so longer/
+  bigger runs climb toward the probe-measured 0.08–0.14 MB/s/conn.
+- **λ distribution at scale confirms the sweep**: 204 peers now in
+  peerstate; tier-1's 20 fresh λs: 16 fast (~1.2–1.4 s), 4 slow
+  (12–19 s) — the slow quartile is exactly the straggler set.
+- **Etiquette**: ~290 dials this entry (one attempt each), ZERO
+  refusals, zero blocklists. Residual owed-on-drop 2.2 + 1.8 + 14.0 +
+  13.5 M units (~0.003 xBZZ total) on peers that hung up before the
+  final sweep — auto-repaid on next contact via the persisted ledger;
+  84/110 warm-run connections got bee-side zero confirmation.
+
+| spend item (this entry) | amount |
+|---|---|
+| tier 1 (20 conns) cheques | 0.0183 xBZZ |
+| tier 2 (50 conns, red 2) cheques | 0.0267 xBZZ |
+| tier 3 (110 conns, red 2) cheques | 0.0515 xBZZ |
+| warm 110 re-run cheques | 0.0541 xBZZ |
+| **entry total** | **0.1506 xBZZ** |
+
+Lifetime chequebook cumulative 0.1801 xBZZ across 227 beneficiaries
+(issuable ~0.99 → ~0.81 headroom). Nook wallet 20.47 xBZZ / 1.19 xDAI.
+
+**Next: M5 acceptance battery** (PLAN: 5 × 1 GiB cold runs, medians/
+p95, cost/GiB, REPORT-phase1.md). ⚠ NEEDS A DECISION + FUNDING: full
+cheque settlement ≈ 0.58 xBZZ/GiB → ~2.9 xBZZ for the battery; the
+spike chequebook holds ~0.81 headroom, so a ~3 xBZZ wallet→spike-
+chequebook top-up path is required (Nook wallet → spike wallet →
+chequebook deposit; deposits are pre-authorized by standing grant, but
+the ~3 xBZZ spend scale deserves explicit user sign-off first). A
+single full-GiB run (~0.58) fits current headroom if a cheaper
+first-look is preferred. Also queued for the battery: connections stay
+at ~110 with redundancy 2 (≈ 512 buckets need coverage for a FULL
+payload → the full-GiB run wants ~256–512+ conns or multiple passes —
+propose: full-payload runs at 110 conns × repeated passes with the bee
+fallback covering the uncovered tail, labeled accordingly).
+
 ## 2026-08-23 — M5 groundwork: decision experiment MEASURED — threshold
 ## growth + validation latency; 25 MB/s path confirmed, NO design rethink
 

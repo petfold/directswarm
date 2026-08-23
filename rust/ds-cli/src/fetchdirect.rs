@@ -38,6 +38,17 @@ pub struct FetchDirectArgs {
     /// On-disk chunk store base path.
     #[arg(long, default_value = "../.phase1/m4-store")]
     pub store_base: PathBuf,
+    /// Persisted per-peer settlement state (threshold, λ, volume).
+    #[arg(long, default_value = "../.phase1/peerstate.csv")]
+    pub peerstate: PathBuf,
+    /// Measure cheque-validation latency inline on first contact with
+    /// unknown peers (~5–30 s once per peer, persisted).
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    pub measure_lambda: bool,
+    /// Storers per bucket: 2+ hedges slow-storer tails by
+    /// work-stealing within the shared bucket.
+    #[arg(long, default_value_t = 1)]
+    pub redundancy: usize,
     /// Measurement mode: drop chunks no connection covers instead of
     /// using the bee fallback, so reported throughput is the direct
     /// plane's alone.
@@ -69,7 +80,7 @@ pub struct FetchDirectArgs {
     #[arg(long, default_value_t = 100)]
     pub chain_id: u64,
     /// Append a result row here.
-    #[arg(long, default_value = "../.phase1/m4-scaling.csv")]
+    #[arg(long, default_value = "../.phase1/m5-scaling.csv")]
     pub csv_out: PathBuf,
 }
 
@@ -191,11 +202,14 @@ pub async fn run(args: FetchDirectArgs) -> i32 {
         ledger_path: args.ledger.clone(),
         bee_url: args.bee_url.clone(),
         store_base: args.store_base.clone(),
+        peerstate_path: args.peerstate.clone(),
         connections: args.connections,
         start_depth: args.depth,
         max_depth: args.depth,
         depth: args.nbhd_depth,
         max_issue_plur: args.max_issue_plur,
+        measure_lambda: args.measure_lambda,
+        redundancy: args.redundancy,
         direct_only: args.direct_only,
     };
 
@@ -238,6 +252,10 @@ pub async fn run(args: FetchDirectArgs) -> i32 {
     println!(
         "settlement:      {} cheques = {} PLUR; {} refresh units; residual {} units",
         report.cheques_issued, report.cheque_plur, report.refresh_units, report.residual_debt_units
+    );
+    println!(
+        "peer learning:   {} λ measured this run; {}/{} connections zero-debt CONFIRMED by peer",
+        report.lambdas_measured, report.zero_confirmed_conns, report.connections_opened
     );
     if !report.errors.is_empty() {
         eprintln!(

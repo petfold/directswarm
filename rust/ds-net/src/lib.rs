@@ -17,6 +17,7 @@ pub mod growth;
 pub mod hive;
 pub mod identity;
 pub mod keystore;
+pub mod peerstate;
 pub mod schedule;
 pub mod store;
 
