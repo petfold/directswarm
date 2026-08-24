@@ -1,5 +1,44 @@
 # directswarm — STATUS
 
+## 2026-08-24 (M6.5-lite) — daemon-warm connections measured: full
+## payload at 4.28 MB/s over reused connections (best yet); bee
+## serving-cost investigated: NO upstream smoking gun (async writes)
+
+**User design confirmations recorded:** replanning is non-blocking
+(dispatcher runs on the control task between completion events, ~µs;
+transfers never pause); near-critical neighborhoods are served via
+repeated argmax-with-feedback (equivalent to the full criticality
+ranking); the ABSOLUTE download-time estimate is not needed for
+scheduling (only the relative ranking) — kept as telemetry only.
+
+**Bee serving-cost investigation:** bee's per-chunk accounting Puts go
+through goleveldb with nil write options = async memtable writes — NOT
+fsync-bound. The 20–80 ms per-chunk service time therefore points at
+the storers' chunk-read path (multiple index lookups + reserve read;
+consistent with our measured cold→warm 1.6×), i.e., node hardware and
+storer-internals — no #5570-class upstream bug to propose. Upstream
+"wildcard" demoted to speculative.
+
+**M6.5-lite (warm pool):** connections now PARK at clean close (live,
+settled, zero-debt, threshold feed + λ retained) and are reused by the
+next fetch — no dial, no handshake, no settle-wait, no re-prepay.
+`fetch-direct --repeat N` benchmarks the daemon steady state:
+- iteration 1 (cold): 256,564 direct in 277.6 s = **3.80 MB/s**
+- iteration 2 (warm): 260,395 direct in 250.2 s = **4.28 MB/s**,
+  563 connections parked; fewer strandings warm (dead dials vanish).
+Warm gain is +13% — smaller than the raw setup share because rolling
+admission already overlaps setup with flow at window 256; the residual
+wall in both iterations is the slow-member decay tail (network
+property). Progression: 3.22 (run 17 full pipeline) → 4.28 MB/s warm
+fetch portion ≈ 3.1–3.5× stock bee.
+
+| spend item (this entry) | amount |
+|---|---|
+| warm benchmark (2 × 1 GiB fetch portions) | 1.1130 xBZZ |
+
+Lifetime issued 11.87 xBZZ; issuable ~15.0 → headroom ~3.1. Batch
+47265a62 TTL ~4.5 d (top-up due ~2 days, standing grant).
+
 ## 2026-08-24 — critical-path dispatcher (user's replanning design)
 ## + candidate recycling: 1 GiB byte-exact in 5m36s = 3.22 MB/s
 ## (new record; 2.4–2.9× stock bee end-to-end)

@@ -59,6 +59,11 @@ pub struct FetchDirectArgs {
     /// top-ups, converging to the exact consumed amount).
     #[arg(long, default_value_t = false)]
     pub prepay: bool,
+    /// Fetch the payload this many times over PERSISTENT connections
+    /// (daemon-warm benchmark: iteration 2+ skips all connection
+    /// setup). The local store is cleared between iterations.
+    #[arg(long, default_value_t = 1)]
+    pub repeat: u32,
     /// Measurement mode: drop chunks no connection covers instead of
     /// using the bee fallback, so reported throughput is the direct
     /// plane's alone.
@@ -225,13 +230,41 @@ pub async fn run(args: FetchDirectArgs) -> i32 {
         prepay: args.prepay,
     };
 
-    let report = match ds_net::schedule::fetch_scheduled(&identity, &cache, chunks, &opts).await {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("error: schedule: {e:#}");
-            return 1;
+    let warm_pool = std::sync::Arc::new(ds_net::schedule::ConnPool::default());
+    let mut report = None;
+    for iter in 1..=args.repeat.max(1) {
+        if iter > 1 {
+            // Cold local store per iteration; connections stay warm.
+            let _ = std::fs::remove_file(args.store_base.with_extension("dat"));
+            let _ = std::fs::remove_file(args.store_base.with_extension("idx"));
         }
-    };
+        let started = std::time::Instant::now();
+        match ds_net::schedule::fetch_scheduled(
+            &identity,
+            &cache,
+            chunks.clone(),
+            &opts,
+            Some(warm_pool.clone()),
+        )
+        .await
+        {
+            Ok(r) => {
+                eprintln!(
+                    "iteration {iter}: {} direct in {:.1}s = {:.3} MB/s ({} warm conns parked)",
+                    r.chunks_from_direct,
+                    started.elapsed().as_secs_f64(),
+                    r.direct_mbps(),
+                    warm_pool.lock().map_or(0, |g| g.len())
+                );
+                report = Some(r);
+            }
+            Err(e) => {
+                eprintln!("error: schedule (iteration {iter}): {e:#}");
+                return 1;
+            }
+        }
+    }
+    let report = report.expect("at least one iteration");
 
     let direct_mbps = report.direct_mbps();
     let per_conn = if report.connections_opened > 0 {

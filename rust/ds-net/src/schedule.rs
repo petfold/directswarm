@@ -186,6 +186,24 @@ impl ScheduleReport {
     }
 }
 
+/// A live, settled, zero-debt connection parked between fetches
+/// (daemon-warm mode). Reusing one skips dial + handshake +
+/// settle-wait + initial-prepay — the measured ~8–10 s per-connection
+/// dead time — and keeps the peer's surplus and threshold state hot.
+pub struct ParkedConn {
+    control: Control,
+    peer_id: PeerId,
+    overlay: [u8; 32],
+    beneficiary: [u8; 20],
+    alive: Arc<AtomicBool>,
+    bye: tokio::sync::oneshot::Sender<()>,
+    threshold_rx: watch::Receiver<Option<U256>>,
+    lambda_ms: u64,
+}
+
+/// Pool of parked connections keyed by overlay, shared across fetches.
+pub type ConnPool = Mutex<HashMap<[u8; 32], ParkedConn>>;
+
 #[derive(libp2p::swarm::NetworkBehaviour)]
 struct Behaviour {
     stream: StreamBehaviour,
@@ -249,6 +267,7 @@ pub async fn fetch_scheduled(
     cache: &TopologyCache,
     chunk_addrs: Vec<[u8; 32]>,
     opts: &ScheduleOptions,
+    warm_pool: Option<Arc<ConnPool>>,
 ) -> Result<ScheduleReport> {
     let mut report = ScheduleReport {
         chunks_total: chunk_addrs.len(),
@@ -393,6 +412,8 @@ pub async fn fetch_scheduled(
             peerstate: peerstate.clone(),
             measure_lambda: opts.measure_lambda,
             prepay: opts.prepay,
+            warm: None,
+            park_into: warm_pool.clone(),
             surplus_parked: surplus_parked.clone(),
             wind_down: wind_down.clone(),
             direct_bytes: direct_bytes.clone(),
@@ -450,7 +471,14 @@ pub async fn fetch_scheduled(
                 break;
             };
             let prefix = t.prefix;
-            let args = make_args(t);
+            let warm = warm_pool.as_ref().and_then(|p| {
+                p.lock()
+                    .ok()?
+                    .remove(&t.overlay)
+                    .filter(|c| c.alive.load(Ordering::Relaxed))
+            });
+            let mut args = make_args(t);
+            args.warm = warm;
             inflight.spawn(async move { (prefix, rate, run_connection(args).await) });
         }
         let Some(joined) = inflight.join_next().await else {
@@ -742,6 +770,10 @@ struct ConnArgs {
     peerstate: Arc<PeerStateStore>,
     measure_lambda: bool,
     prepay: bool,
+    /// Reused live connection (skips all setup) — daemon-warm mode.
+    warm: Option<ParkedConn>,
+    /// Park the connection here at clean close instead of hanging up.
+    park_into: Option<Arc<ConnPool>>,
     surplus_parked: Arc<AtomicU64>,
     /// Set by the stall detector: stop admitting, sweep, exit.
     wind_down: Arc<AtomicBool>,
@@ -816,7 +848,25 @@ impl Pacer {
 
 /// One connection actor. Returns residual unsettled units (0 clean).
 #[allow(clippy::too_many_lines)]
-async fn run_connection(a: ConnArgs) -> u64 {
+async fn run_connection(mut a: ConnArgs) -> u64 {
+    // Daemon-warm path: a parked live connection needs no setup at all.
+    if let Some(w) = a.warm.take() {
+        a.opened.fetch_add(1, Ordering::Relaxed);
+        return run_established(
+            a,
+            Established {
+                control: w.control,
+                peer_id: w.peer_id,
+                remote_overlay: w.overlay,
+                beneficiary: w.beneficiary,
+                alive: w.alive,
+                bye_tx: w.bye,
+                threshold_rx: w.threshold_rx,
+                warm_lambda: Some(w.lambda_ms),
+            },
+        )
+        .await;
+    }
     let Some(peer_id) = crate::direct::extract_peer_id(&a.storer.underlay) else {
         return 0;
     };
@@ -914,7 +964,48 @@ async fn run_connection(a: ConnArgs) -> u64 {
         .await;
     }
 
-    let known = a.peerstate.get(&info.remote_overlay);
+    run_established(
+        a,
+        Established {
+            control,
+            peer_id,
+            remote_overlay: info.remote_overlay,
+            beneficiary: info.remote_eth_address,
+            alive,
+            bye_tx,
+            threshold_rx,
+            warm_lambda: None,
+        },
+    )
+    .await
+}
+
+/// Everything a live, handshaken, threshold-announced connection needs.
+struct Established {
+    control: Control,
+    peer_id: PeerId,
+    remote_overlay: [u8; 32],
+    beneficiary: [u8; 20],
+    alive: Arc<AtomicBool>,
+    bye_tx: tokio::sync::oneshot::Sender<()>,
+    threshold_rx: watch::Receiver<Option<U256>>,
+    warm_lambda: Option<u64>,
+}
+
+/// Fetch + settle over an established connection, then park or close.
+#[allow(clippy::too_many_lines)]
+async fn run_established(a: ConnArgs, e: Established) -> u64 {
+    let Established {
+        control,
+        peer_id,
+        remote_overlay,
+        beneficiary,
+        alive,
+        bye_tx,
+        threshold_rx,
+        warm_lambda,
+    } = e;
+    let known = a.peerstate.get(&remote_overlay);
     let mut pacer = Pacer {
         mirror: Arc::new(Mirror::default()),
         threshold_rx,
@@ -935,11 +1026,16 @@ async fn run_connection(a: ConnArgs) -> u64 {
         last_refresh: None,
         last_cheque: None,
     };
+    // The pacer keeps the connection's own threshold feed; a reused
+    // connection also reuses its measured λ.
+    if let Some(l) = warm_lambda {
+        pacer.lambda_ms = l;
+    }
     let mut ctx = ConnCtx {
         control,
         peer_id,
-        overlay: info.remote_overlay,
-        beneficiary: info.remote_eth_address,
+        overlay: remote_overlay,
+        beneficiary,
         a: &a,
         alive: alive.clone(),
     };
@@ -1000,7 +1096,7 @@ async fn run_connection(a: ConnArgs) -> u64 {
         a.surplus_parked.fetch_add(parked, Ordering::Relaxed);
     }
     a.peerstate.record(
-        &info.remote_overlay,
+        &remote_overlay,
         &crate::peerstate::PeerObservation {
             threshold: pacer.threshold(),
             lambda_ms: measured_lambda,
@@ -1010,6 +1106,28 @@ async fn run_connection(a: ConnArgs) -> u64 {
             clean_close: residual == 0 && confirmed,
         },
     );
+    // Daemon-warm: park a healthy, settled connection for the next
+    // fetch instead of hanging up.
+    if let Some(pool) = &a.park_into {
+        if residual == 0 && alive.load(Ordering::Relaxed) {
+            if let Ok(mut g) = pool.lock() {
+                g.insert(
+                    remote_overlay,
+                    ParkedConn {
+                        control: ctx.control.clone(),
+                        peer_id,
+                        overlay: remote_overlay,
+                        beneficiary,
+                        alive: alive.clone(),
+                        bye: bye_tx,
+                        threshold_rx: pacer.threshold_rx.clone(),
+                        lambda_ms: pacer.lambda_ms,
+                    },
+                );
+                return 0;
+            }
+        }
+    }
     let _ = bye_tx.send(());
     residual
 }
