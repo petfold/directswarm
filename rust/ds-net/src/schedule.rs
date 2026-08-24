@@ -283,7 +283,7 @@ pub async fn fetch_scheduled(
         return Err(anyhow!("no storer in the cache covers any needed chunk"));
     }
     let selected_was_empty = selected.is_empty();
-    let covered: std::collections::HashSet<u64> = selected.iter().map(|s| s.prefix).collect();
+    let covered: std::collections::HashSet<u64> = selected.keys().copied().collect();
 
     // Route chunks: covered → shared work buckets (any covering
     // connection pulls); uncovered → fallback now (or dropped).
@@ -372,9 +372,8 @@ pub async fn fetch_scheduled(
     let wind_down = Arc::new(AtomicBool::new(false));
     let started = Instant::now();
     let window = opts.connections.max(1);
-    let mut targets = selected.into_iter();
-    let mut covered_once: std::collections::HashSet<u64> = std::collections::HashSet::new();
-    let mut inflight: tokio::task::JoinSet<u64> = tokio::task::JoinSet::new();
+    let mut dispatch = Dispatch::new(selected);
+    let mut inflight: tokio::task::JoinSet<(u64, u64, u64)> = tokio::task::JoinSet::new();
     let make_args = |storer: Selected| ConnArgs {
             id_secret: id.secret,
             id_nonce: id.nonce,
@@ -444,21 +443,23 @@ pub async fn fetch_scheduled(
 
     let mut residual = 0u64;
     loop {
-        // Refill the window (unless winding down). Skip a redundancy
-        // target whose bucket is nearly drained by its first member —
-        // a dial+handshake for <30 chunks is pure overhead.
+        // Refill: every free slot goes to the currently most critical
+        // bucket's best unused member (continuous replanning).
         while inflight.len() < window && !wind_down.load(Ordering::Relaxed) {
-            let Some(t) = targets.next() else { break };
-            if covered_once.contains(&t.prefix) && pool.remaining(t.prefix) < 30 {
-                continue;
-            }
-            covered_once.insert(t.prefix);
-            inflight.spawn(run_connection(make_args(t)));
+            let Some((t, rate)) = dispatch.next(&pool) else {
+                break;
+            };
+            let prefix = t.prefix;
+            let args = make_args(t);
+            inflight.spawn(async move { (prefix, rate, run_connection(args).await) });
         }
         let Some(joined) = inflight.join_next().await else {
             break;
         };
-        residual += joined.unwrap_or(0);
+        if let Ok((prefix, rate, r)) = joined {
+            residual += r;
+            dispatch.done(prefix, rate);
+        }
     }
     sampler_stop.store(true, Ordering::Relaxed);
     // Chunks stranded in buckets whose every covering connection died.
@@ -502,6 +503,7 @@ pub async fn fetch_scheduled(
 }
 
 /// A selected storer: where to dial, who it is, which bucket it serves.
+#[derive(Clone)]
 struct Selected {
     underlay: Multiaddr,
     overlay: [u8; 32],
@@ -517,27 +519,17 @@ type Candidate = (u64, u8, u64, u32, Multiaddr, [u8; 32]);
 
 /// Assumed rate (tenths of chunks/s) for never-measured peers.
 const ASSUMED_CPS_X10: u64 = 140;
-/// Per-bucket parallelism targets this drain time; a bucket whose best
-/// member can't make it alone gets more members up front (capped by
-/// `redundancy`). Classic longest-processing-time-first: the queue is
-/// ordered by expected drain time DESCENDING so slow buckets start
-/// early and finish inside the bulk instead of after it — slot
-/// PRODUCTIVITY instead of a wider window (the user's point: a slow
-/// node isn't bad, it just occupies a slot a faster one could use).
-const BUCKET_TARGET_MS: u64 = 45_000;
 
-/// Produce the ROLLING TARGET QUEUE: for every bucket, enough of its
-/// best-bandwidth members (up to `redundancy`) to drain it in
-/// ~[`BUCKET_TARGET_MS`], groups ordered longest-drain-first; unused
-/// members appended as late hedges. The concurrency window is applied
-/// by the caller, not here.
+/// Produce PER-BUCKET member lists, best measured bandwidth first, for
+/// the critical-path dispatcher (which decides when a bucket earns a
+/// second member — see [`Dispatch`]).
 fn select_storers(
     cache: &TopologyCache,
     needed: &[[u8; 32]],
     depth: u8,
     redundancy: usize,
     peerstate: &PeerStateStore,
-) -> Vec<Selected> {
+) -> HashMap<u64, Vec<(Selected, u64)>> {
     let mut bucket_count: HashMap<u64, usize> = HashMap::new();
     for a in needed {
         *bucket_count.entry(bucket_prefix(a, depth)).or_default() += 1;
@@ -576,46 +568,120 @@ fn select_storers(
     for v in per_bucket.values_mut() {
         v.sort_by_key(|c| (c.0, c.1, c.2, c.3));
     }
-    // Per bucket: take members (best first) until the projected drain
-    // time meets the target; order groups longest-drain-first (LPT).
-    let mut groups: Vec<(u64, Vec<Selected>)> = Vec::new();
-    let mut hedges: Vec<Selected> = Vec::new();
-    for (p, cands) in &per_bucket {
-        let count = bucket_count.get(p).copied().unwrap_or(0) as u64;
-        let mut members = Vec::new();
-        let mut rate_sum_x10 = 0u64;
-        let mut dur_ms = u64::MAX;
-        for c in cands {
-            let is_extra = !members.is_empty();
-            // A measured-slow validator may carry a bucket alone but
-            // never burns a parallelism slot.
-            if is_extra && c.1 == 2 {
-                continue;
-            }
-            // Once the drain target is met (or the parallelism cap is
-            // hit), remaining members become late hedges.
-            if is_extra && (dur_ms <= BUCKET_TARGET_MS || members.len() >= redundancy.max(1)) {
-                hedges.push(Selected {
-                    underlay: c.4.clone(),
-                    overlay: c.5,
-                    prefix: *p,
-                });
-                continue;
-            }
-            rate_sum_x10 += u64::MAX - c.0;
-            members.push(Selected {
-                underlay: c.4.clone(),
-                overlay: c.5,
-                prefix: *p,
-            });
-            dur_ms = count.saturating_mul(10_000) / rate_sum_x10.max(1);
+    let _ = redundancy; // dispatcher caps parallelism dynamically
+    per_bucket
+        .into_iter()
+        .map(|(p, cands)| {
+            let members = cands
+                .into_iter()
+                .map(|c| {
+                    (
+                        Selected {
+                            underlay: c.4,
+                            overlay: c.5,
+                            prefix: p,
+                        },
+                        u64::MAX - c.0, // effective rate ×10
+                    )
+                })
+                .collect();
+            (p, members)
+        })
+        .collect()
+}
+
+/// Critical-path dispatcher (the user's replanning design, 2026-08-24):
+/// whenever a slot frees, dial the unused member of whichever bucket
+/// most threatens the finish time — criticality = remaining chunks ÷
+/// current active service rate (a bucket with work and NO active
+/// member is infinitely critical; bigger buckets break ties). This
+/// subsumes LPT (at start every bucket has rate 0, largest first),
+/// avoids run-14's mid-run dilution (a second member joins only when
+/// its bucket IS the critical path), and gives the endgame
+/// all-members-parallel behaviour for the stragglers for free.
+struct Dispatch {
+    /// Unused candidates per bucket, best bandwidth first.
+    cands: HashMap<u64, Vec<(Selected, u64)>>,
+    /// Already-dialed candidates, kept for bounded recycling: a bucket
+    /// with work left, nothing active and nothing unused re-tries its
+    /// members instead of stranding remnants to mop-up passes (run 16:
+    /// 14,488 chunks stranded this way).
+    used: HashMap<u64, Vec<(Selected, u64)>>,
+    recycles: HashMap<u64, u32>,
+    /// Sum of active members' effective rates (×10) per bucket.
+    active_rate: HashMap<u64, u64>,
+    active_n: HashMap<u64, usize>,
+}
+
+impl Dispatch {
+    fn new(cands: HashMap<u64, Vec<(Selected, u64)>>) -> Self {
+        Self {
+            cands,
+            used: HashMap::new(),
+            recycles: HashMap::new(),
+            active_rate: HashMap::new(),
+            active_n: HashMap::new(),
         }
-        groups.push((dur_ms, members));
     }
-    groups.sort_by_key(|(d, _)| std::cmp::Reverse(*d));
-    let mut out: Vec<Selected> = groups.into_iter().flat_map(|(_, m)| m).collect();
-    out.extend(hedges);
-    out
+
+    fn next(&mut self, pool: &WorkPool) -> Option<(Selected, u64)> {
+        // Recycle exhausted buckets that still hold work (≤3 rounds).
+        let refill: Vec<u64> = self
+            .used
+            .iter()
+            .filter(|(p, v)| {
+                !v.is_empty()
+                    && self.cands.get(*p).is_none_or(Vec::is_empty)
+                    && self.active_n.get(*p).copied().unwrap_or(0) == 0
+                    && pool.remaining(**p) >= 30
+                    && self.recycles.get(*p).copied().unwrap_or(0) < 3
+            })
+            .map(|(p, _)| *p)
+            .collect();
+        for p in refill {
+            let v = self.used.remove(&p).unwrap_or_default();
+            self.cands.insert(p, v);
+            *self.recycles.entry(p).or_default() += 1;
+        }
+        let mut best: Option<(u128, u64)> = None;
+        for (&p, v) in &self.cands {
+            if v.is_empty() {
+                continue;
+            }
+            let rem = pool.remaining(p) as u128;
+            if rem == 0 {
+                continue;
+            }
+            let active = self.active_n.get(&p).copied().unwrap_or(0);
+            // A near-empty bucket already being served needs no help.
+            if rem < 30 && active > 0 {
+                continue;
+            }
+            let rate = u128::from(self.active_rate.get(&p).copied().unwrap_or(0));
+            let crit = rem
+                .saturating_mul(10_000)
+                .checked_div(rate)
+                .unwrap_or(u128::MAX / 2 + rem);
+            if best.is_none_or(|(c, _)| crit > c) {
+                best = Some((crit, p));
+            }
+        }
+        let (_, p) = best?;
+        let (sel, rate) = self.cands.get_mut(&p)?.remove(0);
+        self.used.entry(p).or_default().push((sel.clone(), rate));
+        *self.active_rate.entry(p).or_default() += rate.max(1);
+        *self.active_n.entry(p).or_default() += 1;
+        Some((sel, rate))
+    }
+
+    fn done(&mut self, prefix: u64, rate: u64) {
+        if let Some(r) = self.active_rate.get_mut(&prefix) {
+            *r = r.saturating_sub(rate.max(1));
+        }
+        if let Some(n) = self.active_n.get_mut(&prefix) {
+            *n = n.saturating_sub(1);
+        }
+    }
 }
 
 fn public_dialable(u: &str) -> Option<Multiaddr> {

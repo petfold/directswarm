@@ -1,5 +1,40 @@
 # directswarm — STATUS
 
+## 2026-08-24 — critical-path dispatcher (user's replanning design)
+## + candidate recycling: 1 GiB byte-exact in 5m36s = 3.22 MB/s
+## (new record; 2.4–2.9× stock bee end-to-end)
+
+User proposed: after the manifest, estimate the whole download, then
+continuously optimise connections for the CRITICAL neighborhoods —
+replanning during the download, all members connected where it
+matters. Implemented exactly that: the static LPT queue is replaced by
+a dispatcher — every freed slot dials the best unused member of
+whichever bucket most threatens the finish time (criticality =
+remaining chunks ÷ active service rate; no active member = infinite).
+This subsumes LPT at start, avoids run-14's mid-run dilution (a second
+member joins only when its bucket IS the critical path), and gives the
+endgame all-members-on-stragglers behaviour for free. Plus bounded
+candidate RECYCLING (≤3 rounds): a bucket with work left, nothing
+active and nothing unused re-tries its members instead of stranding
+remnants (run 16 stranded 14,488 chunks that cascaded into mop-up
+passes and an 11k-chunk bee drain).
+
+| run (1 GiB, byte-exact all) | wall | rate |
+|---|---|---|
+| 15: 256 window, static LPT | 7m08s | 2.53 MB/s |
+| 16: + dispatcher | 7m17s | 2.47 (exposed the stranding) |
+| 17: + recycling | **5m36s** | **3.22 MB/s** |
+
+Run 17: stranded 2,566 (was 14,488), passes 2 (bulk + sliver), spend
+0.5463 xBZZ. Flow still peaks >15 MB/s early; remaining wall = decay
+tail of genuinely slow single-member buckets + per-conn dead time —
+next: daemon-warm connections (M6.5) and the bee serving-cost
+investigation (upstream case).
+
+| spend item (this entry) | amount |
+|---|---|
+| runs 16 + 17 cheques | 1.0567 xBZZ |
+
 ## 2026-08-25 — 256-window ramp: flow peaked 16.9 MB/s (135 Mbps,
 ## 36% CPU) — ISP-safe so far; wall now ~65% TAIL; gap diagnosis:
 ## storer cold-vs-warm 1.6× + per-conn dead start, not scheduler flow
