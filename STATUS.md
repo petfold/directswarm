@@ -1,5 +1,36 @@
 # directswarm — STATUS
 
+## 2026-08-24 — RUN 18: 512-slot window, byte-exact GiB in 4m47s =
+## 3.77 MB/s (record); no ISP/NAT symptoms at ~650 connections;
+## fleet-capacity ceiling now visible
+
+User authorized 512. Semantics clarified on their check: 512 is the
+SLOT BUDGET for the critical-path dispatcher, not one-per-neighborhood
+— breadth-first coverage happens naturally at t=0 (a bucket with no
+active member is infinitely critical), and thereafter freed slots
+concentrate many-per-neighborhood on the near-critical paths.
+
+Run 18 (window 512, prepay, dispatcher+recycling, warm-pool code):
+**287 s fetch + 18 s verify, SHA-256 exact, spend 0.6176 xBZZ**;
+passes 2 (bulk + sliver). Monitor: peak net 16.5 MB/s (≈130 Mbps of
+664), CPU 37%, ~650 total conns (incl. bee) — the user's ISP concern
+has a clean datapoint at this scale. Wall progression: 336 s (run 17,
+window 256) → 287 s (512): +15%, NOT the naive 2×, because the flow is
+now FLEET-CAPACITY-BOUND — with ~1,540 dialable members total, a
+512-slot dispatcher already engages every useful member; peak flow
+(~16 MB/s) matches the 256-window peak. Remaining levers are the
+network side (roster growth beyond swarmscan-visible peers, storer
+cold-read speed) and erasure-coded payloads (fetch k-of-n from the
+fastest members only) — client-side scheduling is no longer the
+binding constraint at 1 GiB.
+
+| spend item (this entry) | amount |
+|---|---|
+| run 18 cheques | 0.6176 xBZZ |
+
+Lifetime issued ~11.8 xBZZ; issuable ~15.0 → headroom ~3.2. Batch
+TTL ~4.4 d.
+
 ## 2026-08-24 (M6.5-lite) — daemon-warm connections measured: full
 ## payload at 4.28 MB/s over reused connections (best yet); bee
 ## serving-cost investigated: NO upstream smoking gun (async writes)
