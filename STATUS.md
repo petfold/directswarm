@@ -1,5 +1,121 @@
 # directswarm — STATUS
 
+## 2026-11-09 (later) — MIGRATED to upstream ant v0.5.77 (pinned git
+## rev); live-verified on mainnet: settled direct fetch byte-exact,
+## cheque acceptance proven; one pre-existing ledger bug found + fixed
+
+**What changed** (commits 497ada2, d6d701b, a9a3623):
+- ds-net depends on **freedom-hq/ant v0.5.77** (`3781b58`, 2026-10-29)
+  as a pinned git dependency instead of the sibling `../ant` checkout
+  (`c526a33`, 2026-08-06, 508 commits behind). This also fixes CI, which
+  failed on every push since M1 (the runner has no `../ant`). ant needs
+  Rust ≥ 1.99: the local stable toolchain was updated 1.98.1 → 1.99.1.
+  `../ant` itself was only `git fetch`ed, not modified.
+- **API audit**: every ant item we call is byte-identical upstream or
+  equivalent for our use. `soc_valid` gained bee#5640's replica check.
+  Accounting admits exactly as before without a payer (ours never sets
+  one), so **our M5 fresh-threshold-cap finding still stands
+  upstream**. The joiner's new head-of-window relay is
+  output-equivalent.
+- **Adopted upstream fixes**: cheques now go out via
+  `open_settlement` + `write_cheque`. Upstream fixed the quoted
+  `CumulativePayout` we found in M2 (ant #121), so our own encoder,
+  header parser and framing are gone. A test pins the exact bee JSON
+  bytes we sent through Phase 1/M6. **Deliberate settlement-order
+  change** (write_cheque's contract): the cumulative is recorded
+  BEFORE the write, so a half-failed write costs at most one cheque's
+  overpayment instead of risking a refused cheque.
+- **Ledger hardening**: upstream's OutboundLedger now uses
+  `chequebook:beneficiary` keys plus a journal, and it rewrites bare
+  keys on open. Our old loader silently skipped unknown keys (that
+  would have meant all cumulatives from zero, refused cheques and
+  disconnects). FastLedger now reads both layouts and journals and
+  **fails closed** on anything unaccountable. Tested against the pinned
+  ant's own OutboundLedger. The real ledger loads identically (2,571
+  entries, 11.809472 xBZZ, matching an independent sum).
+- **Pre-existing bug fixed** (d6d701b): `probe-storer` never flushed
+  FastLedger at exit, so a final sweep cheque could miss disk (since M5,
+  2026-08-23). Found live: beneficiary `0xcccc1956…` trailed by
+  260,000 units. **Repaired by hand upward** to the signed cumulative
+  (567,000,000,100 → 593,000,000,100 PLUR; pre-repair copy at
+  `.phase1/identity/outbound-cheques.before-repair-2026-11-09.json`). Re-verified: probe ledger delta = reported cheque total
+  exactly (407,000,000,000 PLUR). August probe runs after 08-23 may
+  have left a few similar one-cheque trails; they self-heal (first
+  cheque to such a peer is partly absorbed).
+
+**Live verification (mainnet, Ethernet not required — not a speed
+test):**
+1. Free probes, new build vs. the same 5 storers as this morning:
+   identical (handshake ~10.1 s, retrieval replies parsed, ledger
+   untouched).
+2. Test payload: wsbench seed 2, 16 MiB, 4,129 chunks (all 512
+   neighborhoods), split offline with swarmfs → root `f41dd714…`, sha256
+   `905e4840…`. New batch `5c87ecd4…` (depth 18 immutable, ~26 h TTL,
+   expires ~2026-11-10 07:36 UTC). **Bee's default upload redundancy
+   is MEDIUM** (already in 2.8.1): the first upload came back RS-coded
+   (`ec257cef…`, root span 0x81, 41 refs); re-uploaded with
+   `Swarm-Redundancy-Level: 0` → root equals the offline split.
+   Phase-0's payload must have set level 0 too; any future payload
+   inventory must do the same or include parities.
+3. `fetch-direct --prepay`, window 64, cap 0.02 xBZZ: **1,120 chunks
+   direct + 3,009 bee fallback, reassembled byte-exact** (sha256
+   match). 34 cheques via the new path; rate parsed 100,000
+   PLUR/unit; 674/757 connections zero-debt confirmed by peer. Direct
+   share is low by CONFIGURATION, not migration: prepay's initial slice
+   is a fixed 250 × 230k = 57.5M units (sized for 1 GiB buckets of
+   ~516 chunks). At ~8 chunks/storer the first 34 cheques used the cap
+   and 645 connections then stopped on "spend cap near".
+4. **Cheque acceptance proven** on a never-paid storer (`021a98214c`,
+   beneficiary `0xcccc1956…`, absent from the ledger before): swap
+   headers `deduction=100` before the first cheque and `deduction=0`
+   for all 11 after (bee records a chequebook's first cheque, then
+   drops the deduction — the M2 detector). 12 cheques, 35/40 chunks
+   (the 5 misses: storer said "storage: not found" ~20 min after
+   upload), residual 0.
+
+Raw data: `.phase1/ant-migration-check-2026-11-09/` (chunk inventory,
+generator script, run/probe logs, upload replies, chequebook
+snapshots) and the run CSVs `.phase1/ant-migration-check-2026-11-09*.csv`.
+
+**Mishap (disclosed):** `fetch-direct --verify` RUNS A FETCH over
+`--chunks-csv` before verifying. Without that flag it defaulted to the
+evicted 1 GiB inventory and dialed storers for ~5.5 min (window 20,
+cap 1e10 PLUR) before I stopped it. **No cheques** (ledger unchanged).
+Peer observations were added to `peerstate.csv`, and 2,048 old-payload
+chunks came into the scratch store via bee fallback (local cache).
+Fix suggestion: `--verify` should never fetch; until then always pass
+the payload's `--chunks-csv`.
+
+**Found along the way:**
+- **Parked prepay surplus**: peerstate says storers hold **0.4786
+  xBZZ** of prepaid-unconsumed credit for the spike identity from the
+  August runs (unknown until now); this session added 0.0171 → 0.4957.
+  It is real only as credit at those specific storers (bee persists
+  surplus) — spendable by fetching from them, not withdrawable.
+  Small-payload prepay sizing (initial slice ∝ assigned chunks, as
+  PLAN-M6 intended) is the fix.
+- 10 s handshake (open since M2: V15 attempt likely times out before
+  V14) is unchanged: every connection pays it.
+
+| spend item (this entry) | amount |
+|---|---|
+| postage batch 5c87ecd4 (depth 18, ~26 h; node wallet) | 0.102236 xBZZ |
+| uploads ×2 incl. RS one (node chequebook issuance in window, may include other node activity) | 0.003082 xBZZ |
+| fetch-direct check run (34 prepay cheques; ~0.0171 parked as surplus) | 0.019550 xBZZ |
+| probes (deduction test + flush verify) | 0.000100 xBZZ |
+| **total** | **≈0.1250 xBZZ** |
+
+**Balances after:** node wallet 7.5477 xBZZ / 0.5852 xDAI; node
+chequebook 4.8643 total, **0.9969 available**; spike ledger 11.829122
+xBZZ issued of 12.000 → **headroom 0.1709 xBZZ** (2,572 beneficiaries).
+
+**Follow-ups (not done):** (1) adopt upstream `await_processed`
+(per-cheque accept/refuse verdict from bee's FIN-vs-RST ending)
+instead of inferring acceptance; (2) consider upstream's journaled
+OutboundLedger (#140, same fix class as FastLedger) — needs an A/B on
+cheque throughput; (3) size the prepay slice by assigned work; (4)
+make `--verify` network-free; (5) chase the 10 s handshake.
+
 ## 2026-11-09 — re-entry audit after 11 weeks idle: payload batch
 ## EXPIRED, chequebook headroom was misreported (0.19 not ~3.1 xBZZ),
 ## upstream fixed #5570, storer fleet +54%, storage price 2.6×
@@ -103,8 +219,8 @@ would use most of the Nook wallet.
 **Open decisions for the human:** (a) resume M6 at all, and if so
 re-upload the payload (batch size/TTL at the new price; depth 20 halves
 cost but is tight for 264k chunks), possibly as the RS-coded payload
-(M6.7) in one go; (b) port to upstream ant first, or keep the pinned
-checkout; (c) formally close the Phase-1 gate (target restated as
+(M6.7) in one go; (b) DONE same day (user: "migrate to the new ant
+client") — see the ant v0.5.77 entry above; (c) formally close the Phase-1 gate (target restated as
 "MB/s at N GiB") and move to Phase 2, where #5610 and the larger
 fleet change the upstream narrative. (d) DONE (user-approved): a
 courtesy comment on #5570 pointing at #5610, offering a re-measure on
