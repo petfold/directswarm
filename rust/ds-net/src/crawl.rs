@@ -127,8 +127,14 @@ pub async fn crawl(
                         let _ = evt_tx.send(Evt::Failed(p)).await;
                     }
                     Some(SwarmEvent::Behaviour(BehaviourEvent::Identify(
-                        identify::Event::Received { peer_id, .. },
+                        identify::Event::Received { peer_id, info, .. },
                     ))) => {
+                        // Spares bee's 10 s handshake-side peerstore wait
+                        // (see `direct::adopt_observed_addr`); this shared
+                        // swarm adopts once, later identifies carry it.
+                        if crate::direct::adopt_observed_addr(&mut swarm, &info.observed_addr) {
+                            swarm.behaviour_mut().identify.push([peer_id]);
+                        }
                         let _ = evt_tx.send(Evt::Identified(peer_id)).await;
                     }
                     Some(_) => {}

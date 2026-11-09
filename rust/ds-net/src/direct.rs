@@ -434,8 +434,12 @@ pub(crate) async fn wait_connected(
             }
             SwarmEvent::Behaviour(BehaviourEvent::Identify(identify::Event::Received {
                 peer_id,
+                info,
                 ..
             })) if peer_id == want => {
+                if adopt_observed_addr(swarm, &info.observed_addr) {
+                    swarm.behaviour_mut().identify.push([want]);
+                }
                 if let Some(addr) = connected_addr {
                     return Ok(addr);
                 }
@@ -443,6 +447,88 @@ pub(crate) async fn wait_connected(
             _ => {}
         }
     }
+}
+
+/// Make bee's inbound handshake answer at once instead of after 10 s.
+///
+/// Bee's `handleIncoming` (pkg/p2p/libp2p) first waits up to
+/// `peerstoreWaitAddrsTimeout` = 10 s for its peerstore to hold an
+/// address of the dialer, then falls back to the connection's remote
+/// address ("typically ... behind NAT"). We never listen, so our identify
+/// carried no addresses and every handshake sat out the whole window —
+/// the ~10.1 s `handshake_ms` measured since M2. Upstream ant hit the same
+/// wall (ant-p2p `behaviour.rs`): it promotes a remote's identify
+/// `observed_addr` to an external address.
+///
+/// Callers that see bee's identify call this with its `observed_addr`
+/// and, when it returns `true`, identify-push to that peer
+/// (libp2p-identify 0.47 doesn't push on an external-address change by
+/// itself). The push needn't land before the handshake: bee subscribes to
+/// the peerstore's address stream before it starts waiting, so the push
+/// releases it whenever it arrives. Nothing new is claimed — it is the
+/// address bee itself falls back to after the wait.
+///
+/// Adopts only the FIRST observation per swarm (a shared swarm, as in the
+/// crawler, would otherwise collect one public-IP:port per connection; any
+/// one address releases bee's wait) and only a globally routable one:
+/// go-libp2p's identify keeps only public addresses from a public peer.
+pub(crate) fn adopt_observed_addr<B>(swarm: &mut libp2p::Swarm<B>, observed: &Multiaddr) -> bool
+where
+    B: libp2p::swarm::NetworkBehaviour,
+{
+    if swarm.external_addresses().next().is_some() || !publicly_routable(observed) {
+        return false;
+    }
+    swarm.add_external_address(observed.clone());
+    true
+}
+
+/// Every IP component globally routable (and at least one present); DNS
+/// names don't count. Conservative: rejects RFC 1918, CGNAT
+/// (100.64.0.0/10), loopback, link-local, multicast, reserved,
+/// documentation and benchmarking space, and IPv6 outside `2000::/3`.
+pub(crate) fn publicly_routable(addr: &Multiaddr) -> bool {
+    use libp2p::multiaddr::Protocol;
+    let v4 = |ip: std::net::Ipv4Addr| {
+        let o = ip.octets();
+        !(ip.is_unspecified()
+            || ip.is_loopback()
+            || ip.is_private()
+            || ip.is_link_local()
+            || ip.is_multicast()
+            || ip.is_broadcast()
+            || ip.is_documentation()
+            || o[0] == 0
+            || (o[0] == 100 && (o[1] & 0xc0) == 64)
+            || (o[0] == 192 && o[1] == 0 && o[2] == 0)
+            || (o[0] == 198 && (o[1] & 0xfe) == 18)
+            || o[0] >= 240)
+    };
+    let v6 = |ip: std::net::Ipv6Addr| {
+        let s = ip.segments();
+        (s[0] & 0xe000) == 0x2000 && !(s[0] == 0x2001 && s[1] == 0x0db8)
+    };
+    let mut ip_seen = false;
+    for p in addr {
+        let ok = match p {
+            Protocol::Ip4(ip) => {
+                ip_seen = true;
+                v4(ip)
+            }
+            Protocol::Ip6(ip) => {
+                ip_seen = true;
+                v6(ip)
+            }
+            Protocol::Dns(_) | Protocol::Dns4(_) | Protocol::Dns6(_) | Protocol::Dnsaddr(_) => {
+                false
+            }
+            _ => true,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    ip_seen
 }
 
 async fn handshake_with_fallback(
@@ -1073,6 +1159,33 @@ mod tests {
             rates.cheque_amount(220_000),
             Some(U256::from(22_000_000_100u64))
         );
+    }
+
+    #[test]
+    fn only_globally_routable_observations_are_adopted() {
+        let ok = |s: &str| publicly_routable(&s.parse::<Multiaddr>().unwrap());
+        assert!(ok("/ip4/84.2.33.17/tcp/40512"));
+        assert!(ok("/ip6/2a01:4f8:1c1b:abcd::1/tcp/1634"));
+        for bad in [
+            "/ip4/192.168.1.224/tcp/40512",
+            "/ip4/10.0.0.7/tcp/1",
+            "/ip4/172.20.0.2/tcp/1",
+            "/ip4/100.71.3.9/tcp/1", // CGNAT: go-libp2p drops it too
+            "/ip4/127.0.0.1/tcp/1",
+            "/ip4/169.254.3.3/tcp/1",
+            "/ip4/0.0.0.0/tcp/1",
+            "/ip4/198.18.0.5/tcp/1",
+            "/ip4/203.0.113.9/tcp/1",
+            "/ip4/255.255.255.255/tcp/1",
+            "/ip6/fd00::1/tcp/1",
+            "/ip6/fe80::1/tcp/1",
+            "/ip6/::1/tcp/1",
+            "/ip6/2001:db8::1/tcp/1",
+            "/dns4/example.org/tcp/1",
+            "/tcp/1",
+        ] {
+            assert!(!ok(bad), "{bad} must not be adopted");
+        }
     }
 
     #[test]

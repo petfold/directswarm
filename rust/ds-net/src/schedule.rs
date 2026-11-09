@@ -54,8 +54,8 @@ use tokio::sync::{mpsc, watch};
 
 use crate::bee_api::BeeApiFetcher;
 use crate::direct::{
-    emit_settlement_cheque, handshake_with_fallback_raw, mount_sinks, read_chequebook_issuable_raw,
-    ChequeEmit,
+    adopt_observed_addr, emit_settlement_cheque, handshake_with_fallback_raw, mount_sinks,
+    read_chequebook_issuable_raw, ChequeEmit,
 };
 use crate::growth::{refresh_probe, Mirror};
 use crate::identity::Identity;
@@ -889,6 +889,7 @@ async fn run_connection(mut a: ConnArgs) -> u64 {
         return 0;
     }
 
+    let dial_started = Instant::now();
     if swarm.dial(a.storer.underlay.clone()).is_err() {
         return 0;
     }
@@ -909,6 +910,17 @@ async fn run_connection(mut a: ConnArgs) -> u64 {
                         Some(SwarmEvent::ConnectionClosed { peer_id: p, .. }) if p == peer_id => {
                             alive.store(false, Ordering::Relaxed);
                         }
+                        // Spares bee's 10 s peerstore wait in its handshake
+                        // handler (see `direct::adopt_observed_addr`). The
+                        // handshake doesn't wait for this: bee is released
+                        // whenever the push lands.
+                        Some(SwarmEvent::Behaviour(BehaviourEvent::Identify(
+                            identify::Event::Received { peer_id: p, info, .. },
+                        ))) if p == peer_id => {
+                            if adopt_observed_addr(&mut swarm, &info.observed_addr) {
+                                swarm.behaviour_mut().identify.push([peer_id]);
+                            }
+                        }
                         Some(_) => {}
                     },
                     _ = &mut bye_rx => {
@@ -926,6 +938,8 @@ async fn run_connection(mut a: ConnArgs) -> u64 {
         let _ = bye_tx.send(());
         return 0;
     }
+    let dial_ms = dial_started.elapsed().as_millis();
+    let hs_started = Instant::now();
     let id_for_hs = crate::identity::Identity {
         secret: a.id_secret,
         eth: [0u8; 20],
@@ -948,6 +962,12 @@ async fn run_connection(mut a: ConnArgs) -> u64 {
         let _ = bye_tx.send(());
         return 0;
     };
+    tracing::debug!(
+        %peer_id,
+        dial_ms,
+        handshake_ms = hs_started.elapsed().as_millis(),
+        "connection setup"
+    );
     if info.remote_overlay != a.storer.overlay {
         // Different node at this underlay than the cache promised —
         // its bucket assignment would be wrong; bail politely.
