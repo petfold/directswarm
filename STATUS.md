@@ -1,5 +1,58 @@
 # directswarm — STATUS
 
+## 2026-11-09 (evening) — 10 s HANDSHAKE FIXED: bee-side peerstore
+## wait; 10.1 s → p50 0.56 s in the scheduler, ~0.3 s in the probe
+
+**Cause** (open since M2, where it was guessed to be a V15→V14
+fallback; it wasn't): bee's inbound handshake handler
+(`pkg/p2p/libp2p/libp2p.go` `handleIncoming` → `peerMultiaddrs`) first
+waits up to `peerstoreWaitAddrsTimeout` = 10 s for its peerstore to
+hold an address for the dialer, then falls back to the connection's
+remote address (its comment: "typically ... behind NAT"). directswarm
+never listens, so our identify carried no addresses. Every connection
+in every run since M2 sat out the full window: the 10.13–10.17 s
+`handshake_ms` measured on every probe, and most of M6's "~8–10 s
+per-connection dead time". Upstream ant documents the same wall
+(ant-p2p `behaviour.rs`, `--external-address`).
+
+**Fix** (stock libp2p, no protocol change): when bee's identify
+arrives, adopt its `observed_addr` (how bee sees us) as our external
+address. This happens only if it is globally routable (go-libp2p keeps
+only public addresses from public peers) and only the first one per
+swarm. Then identify-push it to that peer (libp2p-identify 0.47 doesn't
+push on an external-address change by itself). Bee subscribes to its
+peerstore address stream before it starts waiting, so the push releases
+it whenever it lands; the handshake doesn't wait for the push. Nothing
+new is claimed: it is the address bee falls back to after its wait.
+Wired into all four dial paths (probe-storer and probe-growth via
+`wait_connected`, the scheduler's per-connection loop, the crawler's
+shared swarm). The scheduler now logs `connection setup` (dial_ms,
+handshake_ms) at debug.
+
+**Measured (2026-11-09, on WiFi `wlp8s0` — Ethernet was down; fine for a
+10 s → sub-second latency effect, NOT for throughput):**
+| path | before | after |
+|---|---|---|
+| probe-storer, same 5 storers as this morning | 10,129–10,168 ms | **282–440 ms** |
+| fetch-direct scheduler, 55 connections | ~10.1 s (M2–M6) | **p50 562, p95 665, max 783 ms**; 0 ≥ 5 s |
+
+(The scheduler figure includes the identify exchange; the probe's
+excludes it. Dial p50 329 ms in both.) Scheduler run: test payload
+`f41dd714…`, 64 chunks, no prepay, 8 connections: 50 direct + 14
+fallback, 55/55 zero-debt confirmed, ledger delta = reported cheques
+exactly. Raw: `.phase1/handshake-fix-2026-11-09/`. **Throughput impact
+not measured yet** — it needs a 1 GiB-class payload, i.e. a new batch
+at today's 2.6× postage price, and the laptop on Ethernet. Expect the biggest gain where setup
+dominated (cold connections, tail, small buckets).
+
+| spend item (this entry) | amount |
+|---|---|
+| probe-storer ×5 (evicted payload, 0 chunks served) | 0 |
+| scheduler check run (44 cheques) | 0.000103 xBZZ |
+
+Spike headroom after: **0.1708 xBZZ** (11.829225 issued of 12.000).
+CI is green again since the 0350da0 push (first time since M1).
+
 ## 2026-11-09 (later) — MIGRATED to upstream ant v0.5.77 (pinned git
 ## rev); live-verified on mainnet: settled direct fetch byte-exact,
 ## cheque acceptance proven; one pre-existing ledger bug found + fixed
@@ -114,7 +167,8 @@ xBZZ issued of 12.000 → **headroom 0.1709 xBZZ** (2,572 beneficiaries).
 instead of inferring acceptance; (2) consider upstream's journaled
 OutboundLedger (#140, same fix class as FastLedger) — needs an A/B on
 cheque throughput; (3) size the prepay slice by assigned work; (4)
-make `--verify` network-free; (5) chase the 10 s handshake.
+make `--verify` network-free; (5) ~~chase the 10 s handshake~~ DONE,
+see the entry above.
 
 ## 2026-11-09 — re-entry audit after 11 weeks idle: payload batch
 ## EXPIRED, chequebook headroom was misreported (0.19 not ~3.1 xBZZ),
