@@ -1,5 +1,90 @@
 # directswarm — STATUS
 
+## 2026-11-09 — re-entry audit after 11 weeks idle: payload batch
+## EXPIRED, chequebook headroom was misreported (0.19 not ~3.1 xBZZ),
+## upstream fixed #5570, storer fleet +54%, storage price 2.6×
+
+No runs, no spend this session. Read-only checks: public Gnosis RPC
+(~70 calls, politeness sleeps), gh, `git fetch` of ../ant. Nook bee was
+down and left down.
+
+**Where the project stands (unchanged since 2026-08-24):** Phase 0 GO;
+Phase 1 correctness PASS / 25 MB/s NOT met (review gate never formally
+closed — M6 optimization continued instead); M6 best = run 18,
+byte-exact GiB in 4m47s = 3.77 MB/s (4.28 warm). PLAN-M6 items not
+done: M6.2 (two-client per-storer probe), full M6.5 daemon (only -lite
+done), M6.7 (RS-coded payload). Phase 2 not started.
+
+**Corrections to the record:**
+1. **Chequebook headroom.** The 08-24 entries' "issuable ~15.0 →
+   headroom ~3.1/3.2" was wrong. On-chain deposits into spike chequebook
+   `0xE8C7aD…` total exactly **12.000 xBZZ** (1+3+3+2+3; no
+   withdrawals); the ledger (`.phase1/identity/outbound-cheques.json`,
+   2,571 beneficiaries) shows **11.809 xBZZ issued** → real headroom
+   **0.19 xBZZ**. Probably the last +3.0 top-up was counted twice. No
+   cheque is uncovered: the balance (9.718) still exceeds the uncashed
+   liabilities (11.809 − 2.282 cashed = 9.527). Settlement stayed
+   honest; one more full-GiB run would not have fit.
+2. The "2026-08-25" heading (256-window ramp) is a mislabel: its
+   commits are 2026-08-23 21:47 +0200.
+
+**What changed outside the repo:**
+- **Postage batch `47265a62…` expired** (~2026-08-28/29; last top-up
+  events 08-23/24; the contract now returns owner 0x0). The 1 GiB
+  benchmark payload (ref `842efaa9…`) is almost certainly evicted from
+  the network. Not test-fetched: the bee was down, and a direct fetch
+  would spend xBZZ. Every benchmark now needs a re-upload first.
+- **Storage price 2.6×:** PostageStamp `lastPrice` 76,914 → **202,386**
+  PLUR/chunk/block (late Aug → now). A depth-21 batch now costs ≈0.73
+  xBZZ/day (1 week ≈ 5.1 xBZZ, vs 0.88 for ~3 days in Aug). The SWAP
+  exchange rate is unchanged (100,000 PLUR/unit, deduction 100), so
+  settlement per GiB is unchanged (~0.6 xBZZ under prepay).
+- **Stake census re-run** (`tools/stake-sweep.py`, output kept out of
+  the repo): **6,781 staked overlays (Aug: 4,409, +54%)**, 2,372 new
+  since mid-Sep, ~1 owner each; per depth-9 neighborhood median **13**
+  (Aug 8), min **8** (Aug 3), zero empty. Staked ≠ dialable (Aug: ~35%
+  dialable). This bears directly on run 18's fleet-capacity ceiling.
+  `topology-staked.csv` / peerstate are 11 weeks stale; re-sweep and
+  re-crawl before any run.
+- **bee:** v2.8.2 (08-26, security hardening, `--light-node-limit`
+  flag, default still 100) and **v2.8.3** (10-15, security fix,
+  "upgrade promptly", no P2P protocol changes). **PR #5610 "fix:
+  covering balance cache" was merged 2026-10-26 by sbackend123.** It
+  links #5570 and implements our cached-invariant fix (5-min TTL). It is
+  in master, not yet in a release. #5570 is still open with no comments.
+  Our held PR draft (`upstream/bee-pr-…`) is superseded. Nook still
+  runs bee **2.8.1**.
+- **ant moved to freedom-hq/ant** and is **508 commits ahead** of our
+  ../ant checkout (c526a33, 08-06). The ahead commits touch every crate
+  we path-depend on (ant-chain, ant-crypto, ant-p2p, ant-retrieval).
+  Upstream independently fixed the cheque JSON-quoting bug, now applies
+  exchange rates via `SettlementRates`, journals outbound cheques (#140,
+  the same class as our ledger-fsync fix), and gained RS
+  recovery, hedging, and a live-streaming app (AntStream). Our
+  fresh-threshold accounting-cap finding is not checked against
+  upstream yet. Rebasing onto upstream is a real porting job.
+- rounddance repo still PRIVATE (no cross-links yet, per policy).
+
+**Balances (on-chain, 2026-11-09):** Nook wallet 7.650 xBZZ / 0.585
+xDAI; Nook chequebook 4.864 xBZZ; spike wallet 0.500 xBZZ / 0.0997
+xDAI; spike chequebook 9.718 xBZZ held, 0.19 issuable headroom.
+⚠ **Funds are low for resuming at today's price:** a 1-week payload
+batch (~5.1 xBZZ) plus chequebook top-up and a few runs (~0.6 each)
+would use most of the Nook wallet.
+
+**Open decisions for the human:** (a) resume M6 at all, and if so
+re-upload the payload (batch size/TTL at the new price; depth 20 halves
+cost but is tight for 264k chunks), possibly as the RS-coded payload
+(M6.7) in one go; (b) port to upstream ant first, or keep the pinned
+checkout; (c) formally close the Phase-1 gate (target restated as
+"MB/s at N GiB") and move to Phase 2, where #5610 and the larger
+fleet change the upstream narrative; (d) a courtesy comment on #5570
+pointing at #5610 (outward-facing, needs approval).
+
+| spend item (this entry) | amount |
+|---|---|
+| none (read-only RPC) | 0 |
+
 ## 2026-08-24 — RUN 18: 512-slot window, byte-exact GiB in 4m47s =
 ## 3.77 MB/s (record); no ISP/NAT symptoms at ~650 connections;
 ## fleet-capacity ceiling now visible
@@ -28,7 +113,7 @@ binding constraint at 1 GiB.
 |---|---|
 | run 18 cheques | 0.6176 xBZZ |
 
-Lifetime issued ~11.8 xBZZ; issuable ~15.0 → headroom ~3.2. Batch
+Lifetime issued ~11.8 xBZZ; issuable ~15.0 → headroom ~3.2 [WRONG — real: 12.0 issuable, 0.19 headroom; see 2026-11-09]. Batch
 TTL ~4.4 d.
 
 ## 2026-08-24 (M6.5-lite) — daemon-warm connections measured: full
@@ -67,7 +152,7 @@ fetch portion ≈ 3.1–3.5× stock bee.
 |---|---|
 | warm benchmark (2 × 1 GiB fetch portions) | 1.1130 xBZZ |
 
-Lifetime issued 11.87 xBZZ; issuable ~15.0 → headroom ~3.1. Batch
+Lifetime issued 11.87 xBZZ; issuable ~15.0 → headroom ~3.1 [WRONG — see 2026-11-09]. Batch
 47265a62 TTL ~4.5 d (top-up due ~2 days, standing grant).
 
 ## 2026-08-24 — critical-path dispatcher (user's replanning design)

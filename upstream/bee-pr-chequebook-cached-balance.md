@@ -1,3 +1,5 @@
+# SUPERSEDED 2026-11-09 — upstream merged the same fix as ethersphere/bee#5610 (2026-10-26, links #5570). Kept for the record; do not submit.
+
 # DRAFT — bee PR (prepared, NOT submitted; user approval required)
 
 Closes/relates: https://github.com/ethersphere/bee/issues/5570

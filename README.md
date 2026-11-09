@@ -125,8 +125,9 @@ reference implementation and measurement harness.
   bulk throughput (report: `weightstation/bench/REPORT.md`); directswarm
   is optimization proposal #6 made concrete. Its `wsbench` harness and
   deterministic payloads are the benchmark vocabulary here too.
-- **ant** (solardev-xyz/ant) — a Rust Swarm light node speaking the Bee
-  p2p stack; the most likely implementation substrate (see DESIGN.md).
+- **ant** (freedom-hq/ant, formerly solardev-xyz/ant) — a Rust Swarm
+  light node speaking the Bee p2p stack; directswarm's implementation
+  substrate (its wire crates are path dependencies of `rust/ds-net`).
 - **swarmfs** — fsspec access layer; a working directswarm becomes its
   fast read path.
 - **bee** (ethersphere/bee, checked out at `../bee`) — Go reference
@@ -135,14 +136,27 @@ reference implementation and measurement harness.
 
 ## Status
 
-Handoff / design stage, revision 2.3 (2026-08-22): the two-plane
-design (bulk fetcher first, peer-assist later); live streaming was
-considered and deliberately demoted to a deferred note so it cannot
-shape the design (DESIGN.md, "Deferred: live streams"); rev 2.2 adds
-form factor, the systemic-adoption analysis, and the anonymity
-reassessment; rev 2.3 (2026-08-22) adds latency-aware source
-selection. Nothing
-implemented. Read DESIGN.md, PLAN.md, OPEN-QUESTIONS.md — Phase 0 (the
-storer service-rate spike) still gates everything, and several
-fast-plane decisions are explicitly parked for discussion
-(OPEN-QUESTIONS.md is the agenda).
+Phase 1 (storer-direct fetcher) built and measured on mainnet; M6
+throughput optimization in progress (PLAN-M6.md). STATUS.md is the
+detailed log.
+
+- **Phase 0 — GO** (2026-08-22): storers accept a stranger light
+  client and serve it settled at one hop (REPORT-phase0.md).
+- **Phase 1 — correctness PASS, throughput target NOT met**
+  (2026-08-23, REPORT-phase1.md): 1 GiB fetched byte-exact, ~99.8% over
+  direct SWAP-settled storer connections; acceptance-battery median
+  0.817 MB/s against the ≥25 MB/s target.
+- **M6 optimization** (2026-08-24): prepay settlement, a stake-registry
+  roster, a critical-path dispatcher and a 512-slot window brought a
+  byte-exact 1 GiB down to **4m47s = 3.77 MB/s end to end** (4.28 MB/s
+  over warm, reused connections), about 3× stock Bee. Peak flow is
+  ~16 MB/s. At 1 GiB the limit is now how many storers serve and how
+  fast they read cold, not client scheduling.
+- **Not started:** Phase 2 (economics + upstream write-up, human
+  review gate), Phase 3 (integration + upload spike), Phase 4
+  (peer-assist).
+
+The design itself is revision 2.4 (2026-08-22): the two-plane design
+(bulk fetcher first, peer-assist later), with live streaming
+deliberately demoted to a deferred note (DESIGN.md, "Deferred: live
+streams"). OPEN-QUESTIONS.md remains the agenda for parked decisions.
