@@ -78,8 +78,10 @@ cost but is tight for 264k chunks), possibly as the RS-coded payload
 (M6.7) in one go; (b) port to upstream ant first, or keep the pinned
 checkout; (c) formally close the Phase-1 gate (target restated as
 "MB/s at N GiB") and move to Phase 2, where #5610 and the larger
-fleet change the upstream narrative; (d) a courtesy comment on #5570
-pointing at #5610 (outward-facing, needs approval).
+fleet change the upstream narrative. (d) DONE (user-approved): a
+courtesy comment on #5570 pointing at #5610, offering a re-measure on
+the release
+(https://github.com/ethersphere/bee/issues/5570#issuecomment-6731887464).
 
 | spend item (this entry) | amount |
 |---|---|
