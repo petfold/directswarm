@@ -4,9 +4,10 @@
 ## EXPIRED, chequebook headroom was misreported (0.19 not ~3.1 xBZZ),
 ## upstream fixed #5570, storer fleet +54%, storage price 2.6×
 
-No runs, no spend this session. Read-only checks: public Gnosis RPC
-(~70 calls, politeness sleeps), gh, `git fetch` of ../ant. Nook bee was
-down and left down.
+No runs, no spend this session. Checks: public Gnosis RPC (~70
+calls, politeness sleeps), gh, `git fetch` of ../ant. The local Bee API
+and 5 direct storer probes were checked later in the session, after the
+user started the node (see "live checks" below).
 
 **Where the project stands (unchanged since 2026-08-24):** Phase 0 GO;
 Phase 1 correctness PASS / 25 MB/s NOT met (review gate never formally
@@ -30,10 +31,10 @@ done), M6.7 (RS-coded payload). Phase 2 not started.
 
 **What changed outside the repo:**
 - **Postage batch `47265a62…` expired** (~2026-08-28/29; last top-up
-  events 08-23/24; the contract now returns owner 0x0). The 1 GiB
-  benchmark payload (ref `842efaa9…`) is almost certainly evicted from
-  the network. Not test-fetched: the bee was down, and a direct fetch
-  would spend xBZZ. Every benchmark now needs a re-upload first.
+  events 08-23/24; the contract now returns owner 0x0; absent from the
+  node's `/stamps`). **The 1 GiB benchmark payload (ref `842efaa9…`) is
+  EVICTED**, confirmed by the live checks below. Every benchmark now
+  needs a re-upload first.
 - **Storage price 2.6×:** PostageStamp `lastPrice` 76,914 → **202,386**
   PLUR/chunk/block (late Aug → now). A depth-21 batch now costs ≈0.73
   xBZZ/day (1 week ≈ 5.1 xBZZ, vs 0.88 for ~3 days in Aug). The SWAP
@@ -52,8 +53,8 @@ done), M6.7 (RS-coded payload). Phase 2 not started.
   covering balance cache" was merged 2026-10-26 by sbackend123.** It
   links #5570 and implements our cached-invariant fix (5-min TTL). It is
   in master, not yet in a release. #5570 is still open with no comments.
-  Our held PR draft (`upstream/bee-pr-…`) is superseded. Nook still
-  runs bee **2.8.1**.
+  Our held PR draft (`upstream/bee-pr-…`) is superseded. The funded
+  node now runs under **Swarm Desktop** (see live checks), not Nook.
 - **ant moved to freedom-hq/ant** and is **508 commits ahead** of our
   ../ant checkout (c526a33, 08-06). The ahead commits touch every crate
   we path-depend on (ant-chain, ant-crypto, ant-p2p, ant-retrieval).
@@ -65,9 +66,36 @@ done), M6.7 (RS-coded payload). Phase 2 not started.
   upstream yet. Rebasing onto upstream is a real porting job.
 - rounddance repo still PRIVATE (no cross-links yet, per policy).
 
-**Balances (on-chain, 2026-11-09):** Nook wallet 7.650 xBZZ / 0.585
-xDAI; Nook chequebook 4.864 xBZZ; spike wallet 0.500 xBZZ / 0.0997
-xDAI; spike chequebook 9.718 xBZZ held, 0.19 issuable headroom.
+**Live checks (node up, 2026-11-09):**
+- **The funded node is now Swarm Desktop's bee**
+  (`~/.local/share/Swarm Desktop/`, own data-dir since 2026-09-02),
+  **v2.8.3**, same wallet `0xbd9316…` and chequebook `0x29bbfe…`. The
+  Nook install (bee 2.8.1) is legacy; never run both (ports
+  1633/1634). Its `withdrawal-addresses-whitelist` is now `0x1c58e6…`,
+  NOT the spike wallet, so the 08-23 funding route (bee withdraw →
+  spike wallet → `fund-chequebook`) needs a config change first.
+- **Cache trap, caught:** `GET /chunks` returned 25/25 sampled payload
+  chunks (root + 24 random) and 12 more on re-fetch, in 27–360 ms. But
+  bee's own metrics showed `bee_retrieval_request_count 1` since start
+  (only a random-address control, which got a 404 after 4.2 s): every
+  payload chunk was a LOCAL CACHE hit (`bee_localstore_cache_size`
+  600,418), and `Swarm-Cache: false` changed nothing. The bee API cannot
+  answer "is it on the network". Timing did not separate cache hits
+  from network fetches either.
+- **Cache-free check:** `directswarm probe-storer` against 6 storers
+  from the August roster: 6 distinct depth-9 neighborhoods, 6 distinct
+  /16 networks, top peerstate service rates. 1 dial timeout; **5
+  reachable, 0/100 chunks served**, every one `remote: retrieve chunk:
+  no peer found` (the storer is closest and lacks the chunk). Zero
+  cheques, zero spend. Raw rows: `.phase1/recheck-2026-11-09.csv`. The
+  probe read the chequebook invariant as 12.0 xBZZ issuable, matching
+  correction 1.
+
+**Balances (on-chain + node API, 2026-11-09):** funded-node wallet
+7.650 xBZZ / 0.585 xDAI; its chequebook 4.864 xBZZ total but only
+**1.000 available** (the rest backs uncashed cheques); spike wallet
+0.500 xBZZ / 0.0997 xDAI; spike chequebook 9.718 xBZZ held, 0.19
+issuable headroom.
 ⚠ **Funds are low for resuming at today's price:** a 1-week payload
 batch (~5.1 xBZZ) plus chequebook top-up and a few runs (~0.6 each)
 would use most of the Nook wallet.
@@ -85,7 +113,7 @@ the release
 
 | spend item (this entry) | amount |
 |---|---|
-| none (read-only RPC) | 0 |
+| none (RPC reads; 5 storer probes served 0 chunks → 0 cheques) | 0 |
 
 ## 2026-08-24 — RUN 18: 512-slot window, byte-exact GiB in 4m47s =
 ## 3.77 MB/s (record); no ISP/NAT symptoms at ~650 connections;
