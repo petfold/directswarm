@@ -248,7 +248,7 @@ pub async fn probe_storer(
         chequebook: opts.chequebook,
         beneficiary: info.remote_eth_address,
         chain_id: opts.chain_id,
-        ledger,
+        ledger: ledger.clone(),
         issuable,
         max_issue_plur: opts.max_issue_plur,
         issued_plur: 0,
@@ -325,6 +325,13 @@ pub async fn probe_storer(
     fetch_done.notify_one();
     let mut settlement = settle.await.context("settlement task")??;
     settlement.announced_threshold = *threshold_rx.borrow();
+    // Persist the final sweep's cumulative NOW: the background persister
+    // runs every 200 ms and dies with the process, so a probe that exits
+    // right after its sweep left that cheque off disk (found 2026-11-09:
+    // the ledger trailed bee by one 260k-unit sweep), and the next
+    // cheque to this peer would have been refused or come up short.
+    // The scheduler and the growth probe already flush at run end.
+    ledger.flush().context("ledger flush")?;
 
     let (done_tx, done_rx) = oneshot::channel();
     let _ = bye_tx.send(done_tx);
