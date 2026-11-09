@@ -91,8 +91,7 @@ fn load_chunk_addresses(
     min_po: u8,
     max: usize,
 ) -> Result<Vec<[u8; 32]>, String> {
-    let text =
-        std::fs::read_to_string(csv).map_err(|e| format!("read {}: {e}", csv.display()))?;
+    let text = std::fs::read_to_string(csv).map_err(|e| format!("read {}: {e}", csv.display()))?;
     let mut lines = text.lines();
     let header = lines.next().ok_or("chunks csv is empty")?;
     let addr_col = header
@@ -140,21 +139,21 @@ pub async fn run(args: GrowthArgs) -> i32 {
             return 2;
         }
     };
-    let chunks = match load_chunk_addresses(&args.chunks_csv, &overlay, args.min_po, args.max_chunks)
-    {
-        Ok(v) if !v.is_empty() => v,
-        Ok(_) => {
-            eprintln!(
-                "error: no chunks with PO >= {} for overlay {}",
-                args.min_po, args.overlay
-            );
-            return 2;
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            return 2;
-        }
-    };
+    let chunks =
+        match load_chunk_addresses(&args.chunks_csv, &overlay, args.min_po, args.max_chunks) {
+            Ok(v) if !v.is_empty() => v,
+            Ok(_) => {
+                eprintln!(
+                    "error: no chunks with PO >= {} for overlay {}",
+                    args.min_po, args.overlay
+                );
+                return 2;
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                return 2;
+            }
+        };
     let identity = match ds_net::Identity::load(
         &args.swarm_key,
         &args.password,

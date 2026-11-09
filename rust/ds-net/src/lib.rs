@@ -25,8 +25,8 @@ pub mod store;
 
 pub use bee_api::BeeApiFetcher;
 pub use direct::{probe_storer, ProbeOptions, ProbeReport, ProbeTarget};
-pub use growth::{probe_growth, GrowthOptions, GrowthReport, PhaseStats};
 pub use fetch::{fetch_to_file, FetchError, FetchOutcome, MAX_FETCH_BYTES};
+pub use growth::{probe_growth, GrowthOptions, GrowthReport, PhaseStats};
 pub use identity::Identity;
 
 /// Price a storer charges for serving `chunk` (bee's fixed pricer,

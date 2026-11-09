@@ -30,12 +30,11 @@
 
 use ant_retrieval::accounting::Accounting;
 use ant_retrieval::retrieve_chunk;
-use std::sync::Mutex;
 use anyhow::{anyhow, bail, Context, Result};
 use futures::{AsyncWriteExt, StreamExt};
+use libp2p::swarm::SwarmEvent;
 use libp2p::{dns, identify, noise, ping, tcp, yamux};
 use libp2p::{PeerId, StreamProtocol, SwarmBuilder};
-use libp2p::swarm::SwarmEvent;
 use libp2p_stream::Control;
 use primitive_types::U256;
 use std::collections::VecDeque;
@@ -43,6 +42,7 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::sync::{oneshot, watch};
 
@@ -278,8 +278,8 @@ impl Conn {
     fn spend_would_exceed(&self, next_price: u64) -> bool {
         let (debt, reserved) = self.debt();
         let unpaid = (debt + reserved + next_price).saturating_sub(self.prepaid);
-        let committed = u128::from(self.issued_plur.load(Ordering::SeqCst))
-            + u128::from(unpaid) * self.rate();
+        let committed =
+            u128::from(self.issued_plur.load(Ordering::SeqCst)) + u128::from(unpaid) * self.rate();
         committed > u128::from(self.max_issue_plur) * 92 / 100
     }
 
@@ -383,7 +383,11 @@ impl Conn {
 /// (the stock `refresh_peer` over-asks, which is right for settlement
 /// and wrong for probing — a large ask drains the debt being watched).
 /// Returns bee's accepted amount: `min(attempted, allowance, debt)`.
-pub(crate) async fn refresh_probe(control: &mut Control, peer: PeerId, attempted: u64) -> Result<u64> {
+pub(crate) async fn refresh_probe(
+    control: &mut Control,
+    peer: PeerId,
+    attempted: u64,
+) -> Result<u64> {
     let mut stream = control
         .open_stream(
             peer,
@@ -543,11 +547,13 @@ async fn run_fetch_phase(
                 // A wedged retrieval must fail loudly, not silently
                 // occupy a pipeline slot forever (a stalled peer once
                 // froze a probe with 0 errors reported).
-                let fetched =
-                    tokio::time::timeout(Duration::from_secs(10), retrieve_chunk(&mut control, peer_id, addr))
-                        .await
-                        .map_err(|_| "timeout (10s)".to_owned())
-                        .and_then(|r| r.map_err(|e| e.to_string()));
+                let fetched = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    retrieve_chunk(&mut control, peer_id, addr),
+                )
+                .await
+                .map_err(|_| "timeout (10s)".to_owned())
+                .and_then(|r| r.map_err(|e| e.to_string()));
                 match fetched {
                     Ok(chunk) => {
                         acct.apply(price);
@@ -602,10 +608,7 @@ async fn run_fetch_phase(
                     .last_cheque
                     .is_none_or(|at| at.elapsed() >= GROWTH_CHEQUE_INTERVAL);
                 let trigger = last_threshold / 4;
-                (
-                    due && debt_now >= trigger,
-                    debt_now.min(last_threshold / 4),
-                )
+                (due && debt_now >= trigger, debt_now.min(last_threshold / 4))
             }
             PhaseMode::Ceiling { .. } => {
                 let due = conn
@@ -719,15 +722,14 @@ async fn lambda_sample(conn: &mut Conn, chunks: &[[u8; 32]], cycle_idx: &mut usi
     let mut zero_at: Option<u64> = None;
     while t0.elapsed() < LAMBDA_PROBE_TIMEOUT {
         tokio::time::sleep(LAMBDA_PROBE_INTERVAL).await;
-        let accepted = match refresh_probe(&mut conn.control, conn.peer_id, LAMBDA_PROBE_UNITS)
-            .await
-        {
-            Ok(a) => a,
-            Err(err) => {
-                tracing::debug!("λ probe: {err}");
-                continue;
-            }
-        };
+        let accepted =
+            match refresh_probe(&mut conn.control, conn.peer_id, LAMBDA_PROBE_UNITS).await {
+                Ok(a) => a,
+                Err(err) => {
+                    tracing::debug!("λ probe: {err}");
+                    continue;
+                }
+            };
         // Probe acceptances settle real (free-tier) units of bee's view.
         if accepted > 0 {
             conn.refreshes += 1;
@@ -991,9 +993,8 @@ pub async fn probe_growth(
         match refresh_probe(&mut conn.control, conn.peer_id, LAMBDA_PROBE_UNITS).await {
             Ok(accepted) => {
                 residual_zero_confirmed = Some(accepted == 0);
-                conn.ev.line(&format!(
-                    "\"ev\":\"final_confirm\",\"accepted\":{accepted}"
-                ));
+                conn.ev
+                    .line(&format!("\"ev\":\"final_confirm\",\"accepted\":{accepted}"));
             }
             Err(err) => tracing::warn!("final confirmation probe failed: {err}"),
         }
@@ -1009,14 +1010,17 @@ pub async fn probe_growth(
     let threshold_last = conn.threshold();
     // Upgrades = threshold delta over the light-peer step (450 k), the
     // robust count even if the watch coalesced an announcement.
-    let upgrades = u32::try_from(threshold_last.saturating_sub(threshold_first) / 450_000)
-        .unwrap_or(u32::MAX);
+    let upgrades =
+        u32::try_from(threshold_last.saturating_sub(threshold_first) / 450_000).unwrap_or(u32::MAX);
     conn.ev.line(&format!(
         "\"ev\":\"end\",\"threshold\":{threshold_last},\"cheques\":{},\"cheque_units\":{},\"cheque_plur\":\"{}\",\"refresh_units\":{}",
         conn.cheques, conn.cheque_units, conn.cheque_plur, conn.refresh_units
     ));
     if !all_errors.is_empty() {
-        tracing::info!("first fetch errors: {:?}", &all_errors[..all_errors.len().min(5)]);
+        tracing::info!(
+            "first fetch errors: {:?}",
+            &all_errors[..all_errors.len().min(5)]
+        );
     }
 
     Ok(GrowthReport {

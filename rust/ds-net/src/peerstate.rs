@@ -51,7 +51,8 @@ pub struct PeerStateStore {
     map: Mutex<HashMap<[u8; 32], PeerState>>,
 }
 
-const HEADER: &str = "overlay_hex,threshold_last,lambda_ms,settled_units,last_ok_unix,service_cps_x10,surplus_units";
+const HEADER: &str =
+    "overlay_hex,threshold_last,lambda_ms,settled_units,last_ok_unix,service_cps_x10,surplus_units";
 
 impl PeerStateStore {
     /// Load the store (missing file = empty store).
@@ -174,19 +175,25 @@ mod tests {
         let ov = [7u8; 32];
         {
             let st = PeerStateStore::open(&path);
-            st.record(&ov, &PeerObservation {
-                threshold: 9_450_000,
-                lambda_ms: Some(1210),
-                settled_units_delta: 1000,
-                service_cps_x10: Some(200),
-                surplus_units_abs: Some(42),
-                clean_close: true,
-            });
-            st.record(&ov, &PeerObservation {
-                threshold: 1_350_000, // lower T must not regress
-                settled_units_delta: 500,
-                ..Default::default()
-            });
+            st.record(
+                &ov,
+                &PeerObservation {
+                    threshold: 9_450_000,
+                    lambda_ms: Some(1210),
+                    settled_units_delta: 1000,
+                    service_cps_x10: Some(200),
+                    surplus_units_abs: Some(42),
+                    clean_close: true,
+                },
+            );
+            st.record(
+                &ov,
+                &PeerObservation {
+                    threshold: 1_350_000, // lower T must not regress
+                    settled_units_delta: 500,
+                    ..Default::default()
+                },
+            );
         }
         let st = PeerStateStore::open(&path);
         let e = st.get(&ov).unwrap();

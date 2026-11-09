@@ -54,8 +54,8 @@ use tokio::sync::{mpsc, watch};
 
 use crate::bee_api::BeeApiFetcher;
 use crate::direct::{
-    emit_settlement_cheque, handshake_with_fallback_raw, mount_sinks,
-    read_chequebook_issuable_raw, ChequeEmit,
+    emit_settlement_cheque, handshake_with_fallback_raw, mount_sinks, read_chequebook_issuable_raw,
+    ChequeEmit,
 };
 use crate::growth::{refresh_probe, Mirror};
 use crate::identity::Identity;
@@ -297,7 +297,13 @@ pub async fn fetch_scheduled(
 
     // Select storers per bucket: breadth first (one per non-empty
     // bucket, largest buckets first), then redundancy rounds.
-    let selected = select_storers(cache, &needed, opts.depth, opts.redundancy.max(1), &peerstate);
+    let selected = select_storers(
+        cache,
+        &needed,
+        opts.depth,
+        opts.redundancy.max(1),
+        &peerstate,
+    );
     if selected.is_empty() && opts.direct_only {
         return Err(anyhow!("no storer in the cache covers any needed chunk"));
     }
@@ -394,36 +400,36 @@ pub async fn fetch_scheduled(
     let mut dispatch = Dispatch::new(selected);
     let mut inflight: tokio::task::JoinSet<(u64, u64, u64)> = tokio::task::JoinSet::new();
     let make_args = |storer: Selected| ConnArgs {
-            id_secret: id.secret,
-            id_nonce: id.nonce,
-            keypair: id.keypair.clone(),
-            storer,
-            pool: pool.clone(),
-            network_id: opts.network_id,
-            chain_id: opts.chain_id,
-            chequebook: opts.chequebook,
-            issuable,
-            issued_plur: issued_plur.clone(),
-            ledger: ledger.clone(),
-            max_issue_plur: opts.max_issue_plur,
-            pipeline: opts.start_depth.clamp(1, 32),
-            store: store.clone(),
-            fallback: fb_tx.clone(),
-            peerstate: peerstate.clone(),
-            measure_lambda: opts.measure_lambda,
-            prepay: opts.prepay,
-            warm: None,
-            park_into: warm_pool.clone(),
-            surplus_parked: surplus_parked.clone(),
-            wind_down: wind_down.clone(),
-            direct_bytes: direct_bytes.clone(),
-            direct_ok: direct_ok.clone(),
-            cheques: cheques.clone(),
-            cheque_plur: cheque_plur.clone(),
-            refresh_units: refresh_units.clone(),
-            opened: opened.clone(),
-            zero_confirmed: zero_confirmed.clone(),
-            lambdas_measured: lambdas_measured.clone(),
+        id_secret: id.secret,
+        id_nonce: id.nonce,
+        keypair: id.keypair.clone(),
+        storer,
+        pool: pool.clone(),
+        network_id: opts.network_id,
+        chain_id: opts.chain_id,
+        chequebook: opts.chequebook,
+        issuable,
+        issued_plur: issued_plur.clone(),
+        ledger: ledger.clone(),
+        max_issue_plur: opts.max_issue_plur,
+        pipeline: opts.start_depth.clamp(1, 32),
+        store: store.clone(),
+        fallback: fb_tx.clone(),
+        peerstate: peerstate.clone(),
+        measure_lambda: opts.measure_lambda,
+        prepay: opts.prepay,
+        warm: None,
+        park_into: warm_pool.clone(),
+        surplus_parked: surplus_parked.clone(),
+        wind_down: wind_down.clone(),
+        direct_bytes: direct_bytes.clone(),
+        direct_ok: direct_ok.clone(),
+        cheques: cheques.clone(),
+        cheque_plur: cheque_plur.clone(),
+        refresh_units: refresh_units.clone(),
+        opened: opened.clone(),
+        zero_confirmed: zero_confirmed.clone(),
+        lambdas_measured: lambdas_measured.clone(),
     };
 
     // Progress sampler: one INFO line per 10 s so the log yields a
@@ -1009,9 +1015,7 @@ async fn run_established(a: ConnArgs, e: Established) -> u64 {
     let mut pacer = Pacer {
         mirror: Arc::new(Mirror::default()),
         threshold_rx,
-        lambda_ms: known
-            .and_then(|k| k.lambda_ms)
-            .unwrap_or(DEFAULT_LAMBDA_MS),
+        lambda_ms: known.and_then(|k| k.lambda_ms).unwrap_or(DEFAULT_LAMBDA_MS),
         unvalidated: VecDeque::new(),
         rate: DEFAULT_RATE,
         settled_units: 0,
@@ -1073,9 +1077,17 @@ async fn run_established(a: ConnArgs, e: Established) -> u64 {
     // consumed units / avg price ≈ chunks served by THIS connection.
     let (consumed_units, _) = pacer.mirror.snapshot();
     let _ = conn_ok_before;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
     let rate_cps_x10 = if flow_secs >= 5.0 && consumed_units >= pacer.avg_price * 50 {
-        Some(((consumed_units as f64 / f64::from(u32::try_from(pacer.avg_price).unwrap_or(230_000))) / flow_secs * 10.0) as u32)
+        Some(
+            ((consumed_units as f64 / f64::from(u32::try_from(pacer.avg_price).unwrap_or(230_000)))
+                / flow_secs
+                * 10.0) as u32,
+        )
     } else {
         None
     };
@@ -1165,9 +1177,10 @@ async fn emit_prepay(ctx: &mut ConnCtx<'_>, pacer: &mut Pacer, units: u64) -> Re
     pacer.last_cheque = Some(Instant::now());
     pacer.rate = u64::try_from(outcome.rate).unwrap_or(DEFAULT_RATE);
     ctx.a.cheques.fetch_add(1, Ordering::Relaxed);
-    ctx.a
-        .cheque_plur
-        .fetch_add(u64::try_from(outcome.plur).unwrap_or(u64::MAX), Ordering::Relaxed);
+    ctx.a.cheque_plur.fetch_add(
+        u64::try_from(outcome.plur).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
     Ok(())
 }
 
@@ -1195,9 +1208,10 @@ async fn emit(ctx: &mut ConnCtx<'_>, pacer: &mut Pacer, units: u64) -> Result<()
     pacer.last_cheque = Some(Instant::now());
     pacer.rate = u64::try_from(outcome.rate).unwrap_or(DEFAULT_RATE);
     ctx.a.cheques.fetch_add(1, Ordering::Relaxed);
-    ctx.a
-        .cheque_plur
-        .fetch_add(u64::try_from(outcome.plur).unwrap_or(u64::MAX), Ordering::Relaxed);
+    ctx.a.cheque_plur.fetch_add(
+        u64::try_from(outcome.plur).unwrap_or(u64::MAX),
+        Ordering::Relaxed,
+    );
     Ok(())
 }
 
@@ -1331,7 +1345,9 @@ async fn drive(ctx: &mut ConnCtx<'_>, pacer: &mut Pacer) -> u64 {
 
         // Admit new fetches.
         while !finishing && !halted && tasks.len() < ctx.a.pipeline {
-            let popped = pending.take().or_else(|| ctx.a.pool.pop(ctx.a.storer.prefix));
+            let popped = pending
+                .take()
+                .or_else(|| ctx.a.pool.pop(ctx.a.storer.prefix));
             let Some(addr) = popped else {
                 // Buckets only ever drain; emptiness is final.
                 bucket_drained = true;
