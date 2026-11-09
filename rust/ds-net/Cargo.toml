@@ -8,14 +8,18 @@ repository.workspace = true
 
 [dependencies]
 ds-core = { path = "../ds-core" }
-# ant wire crates, added as milestones need them. Path deps during
-# development, pinned to a git rev before anything ships.
+# ant wire crates (freedom-hq/ant, formerly solardev-xyz/ant), pinned to
+# the v0.5.77 release commit so builds — CI included — are reproducible
+# without a sibling checkout. Bump deliberately: re-run the test suite
+# and a settled live probe on every bump (settlement code moves fast
+# upstream). For local hacking on ant, use a `[patch]` override in a
+# local, uncommitted cargo config — never commit a fork.
 # M1: manifest/joiner layer + chunk validation (bee-API fallback path).
 # M2 adds ant-p2p (handshake/retrieval/settlement wire) and ant-chain.
-ant-chain = { path = "../../../ant/crates/ant-chain", features = ["chain-rpc"] }
-ant-crypto = { path = "../../../ant/crates/ant-crypto" }
-ant-p2p = { path = "../../../ant/crates/ant-p2p" }
-ant-retrieval = { path = "../../../ant/crates/ant-retrieval" }
+ant-chain = { git = "https://github.com/freedom-hq/ant", rev = "3781b588dff9e1952c97aa44fa302759cf34ad56", features = ["chain-rpc"] }
+ant-crypto = { git = "https://github.com/freedom-hq/ant", rev = "3781b588dff9e1952c97aa44fa302759cf34ad56" }
+ant-p2p = { git = "https://github.com/freedom-hq/ant", rev = "3781b588dff9e1952c97aa44fa302759cf34ad56" }
+ant-retrieval = { git = "https://github.com/freedom-hq/ant", rev = "3781b588dff9e1952c97aa44fa302759cf34ad56" }
 anyhow = "1"
 async-trait = "0.1.89"
 base64 = "0.22.1"

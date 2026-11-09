@@ -126,7 +126,7 @@ pub async fn probe_storer(
 
     // --- cached invariant: one on-chain read, then no per-cheque RPC ---
     let issuable = read_chequebook_issuable(opts).await?;
-    let ledger = crate::ledger::FastLedger::open(opts.ledger_path.clone());
+    let ledger = crate::ledger::FastLedger::open(opts.ledger_path.clone(), &opts.chequebook)?;
     tracing::info!(
         issuable_plur = %issuable,
         "chequebook cached invariant (balance + totalPaidOut) read once"
@@ -819,28 +819,35 @@ pub(crate) struct ChequeEmit<'a> {
     pub max_issue_plur: u64,
 }
 
-/// Bee's swap wire done in full (ant's `emit_cheque` skips the header
-/// exchange): the receiver's headler announces the current oracle
-/// exchange rate (PLUR per accounting unit) and a one-time deduction;
-/// the cheque must move `units × rate + deduction` PLUR or the
-/// receiver credits the wrong amount — the first probe run proved bee
-/// then sees unsettled debt and disconnects. Guards: the cached
-/// invariant (cumulative ≤ issuable) and a global PLUR spend cap
-/// reserved before emit and released on failure.
+/// Bee's swap wire done in full, on upstream ant's settlement
+/// primitives: [`ant_p2p::swap::open_settlement`] reads the receiver's
+/// announced oracle exchange rate (PLUR per accounting unit) and
+/// one-time deduction; the cheque must move `units × rate + deduction`
+/// PLUR or the receiver credits the wrong amount — the first probe run
+/// proved bee then sees unsettled debt and disconnects.
+/// [`ant_p2p::swap::write_cheque`] sends it in bee's JSON shape (the
+/// unquoted `CumulativePayout` we found missing in M2 is fixed upstream,
+/// ant #121). Guards: the cached invariant (cumulative ≤ issuable) and
+/// a global PLUR spend cap, reserved before signing.
+///
+/// Ordering follows `write_cheque`'s contract: the cumulative is
+/// recorded as issued BEFORE the write, because the receiver may hold
+/// the cheque even if the write fails halfway. Reusing that cumulative
+/// for a smaller later cheque would be refused (not increasing). Now a
+/// failed write costs at worst one cheque's amount of overpayment (if
+/// the peer did get it, the debt it settled is paid again by the next
+/// cheque; if not, the next cheque carries it), never a refused cheque.
+/// Only failures before the record release the spend reservation.
+///
+/// We still close our half straight after the write, as before the
+/// migration; upstream's `await_processed` (refused-cheque verdicts,
+/// read off bee's FIN-vs-RST ending) is not adopted here yet.
 pub(crate) async fn emit_settlement_cheque(e: ChequeEmit<'_>) -> Result<RateEmitOutcome> {
     use std::sync::atomic::Ordering;
-    let mut stream = e
-        .control
-        .open_stream(e.peer_id, StreamProtocol::new(ant_p2p::swap::PROTOCOL_SWAP))
+    let (mut stream, rates) = ant_p2p::swap::open_settlement(e.control, e.peer_id)
         .await
-        .map_err(|err| anyhow!("open swap stream: {err}"))?;
-
-    // Dialer headers (empty), then the headler's response headers.
-    stream.write_all(&[0u8]).await?;
-    stream.flush().await?;
-    let response_headers = read_delimited(&mut stream, 8 * 1024).await?;
-    let (rate, deduction) = parse_settlement_headers(&response_headers)
-        .ok_or_else(|| anyhow!("peer sent no exchange-rate header"))?;
+        .map_err(|err| anyhow!("open settlement: {err}"))?;
+    let (rate, deduction) = (rates.exchange_rate, rates.deduction);
     if rate.is_zero() {
         bail!("peer announced a zero exchange rate");
     }
@@ -849,15 +856,14 @@ pub(crate) async fn emit_settlement_cheque(e: ChequeEmit<'_>) -> Result<RateEmit
     // one was never accepted (how the quoted-JSON bug was caught).
     tracing::debug!(%rate, %deduction, "swap headers received");
 
-    let plur = rate
-        .checked_mul(U256::from(e.debt_units))
-        .and_then(|v| v.checked_add(deduction))
+    let plur = rates
+        .cheque_amount(e.debt_units)
         .ok_or_else(|| anyhow!("cheque amount overflow"))?;
     let plur_u128 = u128::try_from(plur).map_err(|_| anyhow!("cheque amount exceeds u128"))?;
     let plur_u64 = u64::try_from(plur_u128).unwrap_or(u64::MAX);
 
     // Reserve against the global spend cap before doing anything
-    // irreversible; release on any failure below.
+    // irreversible; release on any failure before the record below.
     let before = e.issued_plur.fetch_add(plur_u64, Ordering::SeqCst);
     if before.saturating_add(plur_u64) > e.max_issue_plur {
         e.issued_plur.fetch_sub(plur_u64, Ordering::SeqCst);
@@ -867,7 +873,7 @@ pub(crate) async fn emit_settlement_cheque(e: ChequeEmit<'_>) -> Result<RateEmit
         );
     }
 
-    let result = async {
+    let prepared = (|| {
         let prev = e.ledger.cumulative_for(&e.beneficiary);
         let cumulative = prev
             .checked_add(plur)
@@ -885,30 +891,27 @@ pub(crate) async fn emit_settlement_cheque(e: ChequeEmit<'_>) -> Result<RateEmit
             cumulative,
             e.chain_id,
         )?;
-        let cheque_json = encode_cheque_json_bee(&signed);
-        // EmitCheque { bytes cheque = 1 }, length-delimited on the wire.
-        let mut msg = Vec::with_capacity(cheque_json.len() + 8);
-        msg.push(0x0a);
-        encode_varint(cheque_json.len() as u64, &mut msg);
-        msg.extend_from_slice(&cheque_json);
-        let mut frame = Vec::with_capacity(msg.len() + 8);
-        encode_varint(msg.len() as u64, &mut frame);
-        frame.extend_from_slice(&msg);
-        stream.write_all(&frame).await?;
-        stream.flush().await?;
-        let _ = stream.close().await;
-        e.ledger.record_issued(&e.beneficiary, cumulative);
-        Ok::<U256, anyhow::Error>(cumulative)
-    }
-    .await;
-
-    let cumulative = match result {
-        Ok(c) => c,
+        Ok::<_, anyhow::Error>((cumulative, signed))
+    })();
+    let (cumulative, signed) = match prepared {
+        Ok(p) => p,
         Err(err) => {
             e.issued_plur.fetch_sub(plur_u64, Ordering::SeqCst);
             return Err(err);
         }
     };
+
+    // Counted as issued from here on (see the ordering note above).
+    e.ledger.record_issued(&e.beneficiary, cumulative);
+    ant_p2p::swap::write_cheque(&mut stream, &signed)
+        .await
+        .map_err(|err| {
+            anyhow!(
+                "write cheque (recorded as issued: the peer may hold it; if not, \
+                 the next cheque carries its amount): {err}"
+            )
+        })?;
+    let _ = stream.close().await;
     Ok(RateEmitOutcome {
         plur: plur_u128,
         plur_u256: plur,
@@ -944,75 +947,6 @@ async fn emit_cheque_at_rate(ctx: &mut SettleCtx, debt_units: u64) -> Result<Rat
         rate: outcome.rate,
         cumulative: outcome.cumulative,
     })
-}
-
-/// Encode a `SignedCheque` in the exact JSON shape bee's
-/// `chequebook.SignedCheque` unmarshals. Found live in M2 run 4:
-/// `CumulativePayout` is Go's `math/big.Int`, whose `UnmarshalJSON`
-/// accepts only an UNQUOTED number — ant's
-/// `encode_signed_cheque_json` quotes it, so bee rejects every cheque
-/// with "unmarshal cheque" and never credits the payment (upstream
-/// ant bug to report). Addresses are 0x-hex, `Signature` is
-/// standard-padding base64 (geth `[]byte`).
-pub(crate) fn encode_cheque_json_bee(signed: &ant_chain::chequebook::SignedCheque) -> Vec<u8> {
-    use base64::Engine as _;
-    format!(
-        "{{\"Chequebook\":\"0x{}\",\"Beneficiary\":\"0x{}\",\"CumulativePayout\":{},\"Signature\":\"{}\"}}",
-        hex::encode(signed.cheque.chequebook),
-        hex::encode(signed.cheque.beneficiary),
-        signed.cheque.cumulative_payout,
-        base64::engine::general_purpose::STANDARD.encode(signed.signature),
-    )
-    .into_bytes()
-}
-
-/// Parse bee's headers protobuf: `Headers { repeated Header { string
-/// key = 1; bytes value = 2 } }`, returning the `exchange` rate and
-/// `deduction` (zero when absent, matching bee's payer side).
-pub(crate) fn parse_settlement_headers(body: &[u8]) -> Option<(U256, U256)> {
-    let mut exchange: Option<U256> = None;
-    let mut deduction = U256::zero();
-    let mut rest = body;
-    while !rest.is_empty() {
-        let (tag, after_tag) = decode_varint(rest)?;
-        rest = after_tag;
-        if tag >> 3 != 1 || tag & 0x7 != 2 {
-            return None;
-        }
-        let (len, after_len) = decode_varint(rest)?;
-        let len = usize::try_from(len).ok()?;
-        let header = after_len.get(..len)?;
-        rest = after_len.get(len..)?;
-
-        let mut key: &[u8] = &[];
-        let mut value: &[u8] = &[];
-        let mut inner = header;
-        while !inner.is_empty() {
-            let (itag, after) = decode_varint(inner)?;
-            inner = after;
-            if itag & 0x7 != 2 {
-                return None;
-            }
-            let (field_size, past_size) = decode_varint(inner)?;
-            let field_size = usize::try_from(field_size).ok()?;
-            let field = past_size.get(..field_size)?;
-            inner = past_size.get(field_size..)?;
-            match itag >> 3 {
-                1 => key = field,
-                2 => value = field,
-                _ => {}
-            }
-        }
-        if value.len() > 32 {
-            return None;
-        }
-        match key {
-            b"exchange" => exchange = Some(U256::from_big_endian(value)),
-            b"deduction" => deduction = U256::from_big_endian(value),
-            _ => {}
-        }
-    }
-    exchange.map(|rate| (rate, deduction))
 }
 
 pub(crate) fn encode_varint(mut value: u64, out: &mut Vec<u8>) {
@@ -1078,8 +1012,14 @@ mod tests {
         assert_eq!(parse_announce_threshold(&[]), None);
     }
 
+    /// Byte-exact guard on upstream's encoder (now used on the wire):
+    /// the JSON bee's `chequebook.SignedCheque` unmarshals, with
+    /// `CumulativePayout` an UNQUOTED number (Go's `big.Int` refuses a
+    /// quoted one; found live in M2 run 4, fixed upstream in ant #121).
+    /// The expected bytes are what our own encoder sent through all of
+    /// Phase 1 and M6.
     #[test]
-    fn cheque_json_matches_bee_shape() {
+    fn upstream_cheque_json_is_bee_shape_byte_for_byte() {
         let signed = ant_chain::chequebook::SignedCheque {
             cheque: ant_chain::chequebook::Cheque {
                 chequebook: [0x11; 20],
@@ -1088,14 +1028,44 @@ mod tests {
             },
             signature: [0x33; 65],
         };
-        let json = String::from_utf8(encode_cheque_json_bee(&signed)).unwrap();
-        // CumulativePayout MUST be an unquoted JSON number for Go's
-        // big.Int; addresses 0x-hex; signature base64.
-        assert!(json.contains("\"CumulativePayout\":89000000100,"), "{json}");
-        assert!(json.contains("\"Chequebook\":\"0x1111111111111111111111111111111111111111\""));
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(parsed["CumulativePayout"].is_u64());
-        assert_eq!(parsed["Signature"].as_str().unwrap().len(), 88);
+        let json = ant_p2p::swap::encode_signed_cheque_json(&signed);
+        let expected = format!(
+            "{{\"Chequebook\":\"0x{}\",\"Beneficiary\":\"0x{}\",\"CumulativePayout\":89000000100,\"Signature\":\"{}\"}}",
+            "11".repeat(20),
+            "22".repeat(20),
+            {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD.encode([0x33u8; 65])
+            },
+        );
+        assert_eq!(String::from_utf8(json).unwrap(), expected);
+    }
+
+    #[test]
+    fn upstream_parses_bee_settlement_headers() {
+        // Headers { Header { key "exchange", value 0x0186a0 = 100000 },
+        //           Header { key "deduction", value 0x64 = 100 } }
+        let mut body = Vec::new();
+        for (key, value) in [
+            (&b"exchange"[..], &[0x01u8, 0x86, 0xa0][..]),
+            (b"deduction", &[0x64]),
+        ] {
+            let mut header = vec![0x0a, u8::try_from(key.len()).unwrap()];
+            header.extend_from_slice(key);
+            header.extend_from_slice(&[0x12, u8::try_from(value.len()).unwrap()]);
+            header.extend_from_slice(value);
+            body.push(0x0a);
+            body.push(u8::try_from(header.len()).unwrap());
+            body.extend_from_slice(&header);
+        }
+        let rates = ant_p2p::swap::parse_settlement_headers(&body).unwrap();
+        assert_eq!(rates.exchange_rate, U256::from(100_000u64));
+        assert_eq!(rates.deduction, U256::from(100u64));
+        // units × rate + deduction, as bee's payer computes it.
+        assert_eq!(
+            rates.cheque_amount(220_000),
+            Some(U256::from(22_000_000_100u64))
+        );
     }
 
     #[test]

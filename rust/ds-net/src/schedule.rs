@@ -292,7 +292,7 @@ pub async fn fetch_scheduled(
     // cumulative forever — the M4 diagnosis).
     let issuable = read_chequebook_issuable_raw(&opts.rpc_url, opts.chequebook).await?;
     let issued_plur = Arc::new(AtomicU64::new(0));
-    let ledger = crate::ledger::FastLedger::open(opts.ledger_path.clone());
+    let ledger = crate::ledger::FastLedger::open(opts.ledger_path.clone(), &opts.chequebook)?;
     tracing::info!(%issuable, "chequebook cached invariant read once (shared spend cap across connections)");
 
     // Select storers per bucket: breadth first (one per non-empty

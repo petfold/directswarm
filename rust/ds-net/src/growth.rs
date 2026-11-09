@@ -783,7 +783,7 @@ pub async fn probe_growth(
     let ev = EventLog::open(&opts.jsonl_path)?;
 
     let issuable = read_chequebook_issuable_raw(&opts.rpc_url, opts.chequebook).await?;
-    let ledger = crate::ledger::FastLedger::open(opts.ledger_path.clone());
+    let ledger = crate::ledger::FastLedger::open(opts.ledger_path.clone(), &opts.chequebook)?;
 
     let behaviour = Behaviour {
         stream: libp2p_stream::Behaviour::default(),
